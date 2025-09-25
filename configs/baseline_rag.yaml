@@ -1,0 +1,41 @@
+# Complete RAG pipeline configuration with separate index and query flows
+# This configuration properly handles both indexing and retrieval operations
+
+pipeline:
+  components:
+    - id: chunker
+      type: chunker
+      name: fixed_size
+      config:
+        chunk_size: 256
+        overlap: 0
+        unit: tokens
+
+    - id: embedder
+      type: embedder
+      name: openai
+      config:
+        model: text-embedding-ada-002
+        batch_size: 100
+
+    - id: vectorstore
+      type: vectorstore
+      name: faiss
+      config:
+        dimension: 1536
+        index_type: flat
+
+    - id: generator
+      type: generator
+      name: openai
+      config:
+        model: gpt-3.5-turbo
+        temperature: 0
+        max_tokens: 300
+        system_prompt: "You are a helpful assistant that answers questions based on the provided context."
+
+metadata:
+  name: "Baseline RAG Pipeline"
+  version: "2.0.0"
+  description: "Complete RAG pipeline for Week 2 modular architecture"
+  notes: "Uses simplified linear flow - DAG configuration would separate index/query paths"

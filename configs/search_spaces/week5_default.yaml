@@ -1,0 +1,77 @@
+components:
+  chunking:
+    parameters:
+    - name: strategy
+      type: categorical
+      values:
+      - fixed
+      - semantic
+    - name: size
+      type: categorical
+      values:
+      - 256
+      - 512
+  embedding:
+    parameters:
+    - name: model
+      type: categorical
+      values:
+      - text-embedding-ada-002
+  generation:
+    parameters:
+    - name: temperature
+      type: categorical
+      values:
+      - 0
+      - 0.3
+    - name: max_tokens
+      type: categorical
+      values:
+      - 150
+      - 300
+    - name: model
+      type: categorical
+      values:
+      - gpt-3.5-turbo
+  reranking:
+    parameters:
+    - name: enabled
+      type: categorical
+      values:
+      - true
+      - false
+    - conditions:
+        enabled: true
+      name: model
+      type: categorical
+      values:
+      - cross-encoder/ms-marco-MiniLM-L-6-v2
+    - conditions:
+        enabled: true
+      name: top_k_rerank
+      type: categorical
+      values:
+      - 10
+      - 20
+  retrieval:
+    parameters:
+    - name: method
+      type: categorical
+      values:
+      - dense
+      - sparse
+      - hybrid
+    - name: top_k
+      type: categorical
+      values:
+      - 3
+      - 5
+    - conditions:
+        method: hybrid
+      name: hybrid_weight
+      type: categorical
+      values:
+      - 0.3
+      - 0.5
+      - 0.7
+total_combinations: 432

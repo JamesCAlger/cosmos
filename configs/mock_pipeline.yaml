@@ -1,0 +1,33 @@
+# Mock pipeline configuration for testing component swapping
+pipeline:
+  components:
+    - id: chunker
+      type: chunker
+      name: mock
+      config:
+        prefix: "[TEST]"
+
+    - id: embedder
+      type: embedder
+      name: mock
+      config:
+        dimension: 384
+        seed: 42
+
+    - id: vectorstore
+      type: vectorstore
+      name: faiss
+      config:
+        dimension: 384
+        index_type: flat
+
+    - id: generator
+      type: generator
+      name: mock
+      config:
+        template: "Mock answer for: {query}. {context_summary}"
+
+metadata:
+  name: "Mock Pipeline"
+  version: "1.0.0"
+  description: "Pipeline with mock components for testing"

@@ -1,0 +1,68 @@
+# DAG-based pipeline configuration - same as baseline but with graph structure
+pipeline:
+  nodes:
+    - id: chunker
+      type: chunker
+      component: fixed_size
+      config:
+        chunk_size: 256
+        overlap: 0
+        unit: tokens
+
+    - id: embedder
+      type: embedder
+      component: openai
+      config:
+        model: text-embedding-ada-002
+        batch_size: 100
+
+    - id: vectorstore
+      type: vectorstore
+      component: faiss
+      config:
+        dimension: 1536
+        index_type: flat
+
+    - id: query_embedder
+      type: embedder
+      component: openai
+      config:
+        model: text-embedding-ada-002
+
+    - id: retriever
+      type: vectorstore_search
+      component: faiss
+      config:
+        top_k: 5
+
+    - id: generator
+      type: generator
+      component: openai
+      config:
+        model: gpt-3.5-turbo
+        temperature: 0
+        max_tokens: 300
+
+  edges:
+    # Indexing flow
+    - from: input
+      to: chunker
+    - from: chunker
+      to: embedder
+    - from: [embedder, chunker]
+      to: vectorstore
+
+    # Query flow
+    - from: input
+      to: query_embedder
+    - from: query_embedder
+      to: retriever
+    - from: [input, retriever]
+      to: generator
+    - from: generator
+      to: output
+
+metadata:
+  name: "Baseline DAG Pipeline"
+  version: "1.0.0"
+  description: "Week 1 baseline with DAG architecture"
