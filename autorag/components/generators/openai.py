@@ -35,11 +35,30 @@ class OpenAIGenerator(Generator):
             logger.warning("No context provided for generation")
             context_text = "No relevant context found."
         else:
-            # Format context
-            context_text = "\n\n".join([
-                f"Context {i+1} (score: {result.score:.3f}):\n{result.chunk.content}"
-                for i, result in enumerate(context)
-            ])
+            # Format context - handle both string and object inputs
+            context_parts = []
+            for i, result in enumerate(context):
+                if isinstance(result, str):
+                    # Plain string input
+                    context_parts.append(f"Context {i+1}:\n{result}")
+                elif hasattr(result, 'score') and hasattr(result, 'chunk'):
+                    # Structured object with score and chunk
+                    context_parts.append(
+                        f"Context {i+1} (score: {result.score:.3f}):\n{result.chunk.content}"
+                    )
+                elif hasattr(result, 'content'):
+                    # Object with content attribute
+                    if hasattr(result, 'score'):
+                        context_parts.append(
+                            f"Context {i+1} (score: {result.score:.3f}):\n{result.content}"
+                        )
+                    else:
+                        context_parts.append(f"Context {i+1}:\n{result.content}")
+                else:
+                    # Fallback to string representation
+                    context_parts.append(f"Context {i+1}:\n{str(result)}")
+
+            context_text = "\n\n".join(context_parts)
 
         # Create prompt
         user_prompt = f"""Based on the following context, please answer the question.

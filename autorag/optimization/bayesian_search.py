@@ -309,6 +309,8 @@ class SimpleBayesianOptimizer:
                 return int(obj)
             elif isinstance(obj, (np.floating, np.float64)):
                 return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             return obj
@@ -339,6 +341,8 @@ class SimpleBayesianOptimizer:
                 return int(obj)
             elif isinstance(obj, (np.floating, np.float64)):
                 return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             return obj
