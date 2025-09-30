@@ -9,6 +9,7 @@ from .task import OptimizationTask
 from .strategy import OptimizationStrategy
 from .bayesian_strategy import BayesianStrategy
 from .random_strategy import RandomSearchStrategy
+from .compositional_optimizer import CompositionalOptimizer, CompositionalOptimizerBuilder
 
 __all__ = [
     'ComponentEvaluator',
@@ -16,5 +17,7 @@ __all__ = [
     'OptimizationTask',
     'OptimizationStrategy',
     'BayesianStrategy',
-    'RandomSearchStrategy'
+    'RandomSearchStrategy',
+    'CompositionalOptimizer',
+    'CompositionalOptimizerBuilder'
 ]
