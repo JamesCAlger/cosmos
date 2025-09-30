@@ -44,18 +44,29 @@ from autorag.components.base import Document
 # Setup logging with detailed format
 logger.add("bayesian_enhanced.log", rotation="10 MB", level="DEBUG")
 
+# Import cache manager from new module
+from autorag.optimization.cache_manager import EmbeddingCacheManager
+from autorag.components.embedders.cached import CachedEmbedder
+
+
+# The EmbeddingCacheManager class has been moved to autorag.optimization.cache_manager
+# and is imported above. This space is left intentionally to preserve line numbers
+# for compatibility with the rest of the script.
+
 
 class EnhancedMetricsCollector:
     """Enhanced metrics collector that shows interim stage metrics"""
 
-    def __init__(self, show_details: bool = True):
+    def __init__(self, show_details: bool = True, cache_manager: Optional[EmbeddingCacheManager] = None):
         """
         Initialize enhanced metrics collector
 
         Args:
             show_details: Whether to print detailed interim metrics
+            cache_manager: Optional embedding cache manager for performance optimization
         """
         self.show_details = show_details
+        self.cache_manager = cache_manager
         self.semantic_evaluator = SemanticMetrics(
             model_name='all-MiniLM-L6-v2',
             similarity_threshold=0.75
@@ -72,16 +83,38 @@ class EnhancedMetricsCollector:
         """
         metrics = {}
 
-        # 1. CHUNKING METRICS
+        # 1. CHUNKING AND EMBEDDING (with cache support)
         print("\n  [CHUNKING]", end="")
         chunk_start = time.time()
 
-        # Convert to Document objects
-        doc_objects = [Document(content=doc, doc_id=str(i)) for i, doc in enumerate(documents)]
-        chunks = pipeline.chunker.chunk(doc_objects)
+        # Check if we can use cache
+        if self.cache_manager and hasattr(pipeline, 'embedder'):
+            # Extract chunking configuration
+            chunking_config = {
+                'strategy': getattr(pipeline.chunker, 'strategy',
+                                  'semantic' if isinstance(pipeline.chunker, SemanticChunker) else 'fixed'),
+                'chunk_size': getattr(pipeline.chunker, 'chunk_size', 256),
+                'overlap': getattr(pipeline.chunker, 'overlap', 0),
+                'threshold': getattr(pipeline.chunker, 'threshold', 0.5)  # For semantic chunker
+            }
 
-        # Extract text from chunks
-        chunk_texts = [c.content if hasattr(c, 'content') else str(c) for c in chunks]
+            # Get chunks and embeddings from cache or compute
+            chunks, embeddings = self.cache_manager.get_or_compute_embeddings(
+                documents,
+                chunking_config,
+                pipeline.embedder,
+                pipeline.chunker
+            )
+
+            # Extract text from chunks for metrics
+            chunk_texts = [c.content if hasattr(c, 'content') else str(c) for c in chunks]
+
+        else:
+            # Original flow without caching
+            doc_objects = [Document(content=doc, doc_id=str(i)) for i, doc in enumerate(documents)]
+            chunks = pipeline.chunker.chunk(doc_objects)
+            chunk_texts = [c.content if hasattr(c, 'content') else str(c) for c in chunks]
+            embeddings = None  # Will be computed in retriever.index()
 
         # Calculate chunking metrics
         chunk_sizes = [len(c.split()) for c in chunk_texts]
@@ -102,18 +135,25 @@ class EnhancedMetricsCollector:
             'chunks_created': len(chunks),
             'avg_chunk_size': np.mean(chunk_sizes) if chunk_sizes else 0,
             'size_variance': np.std(chunk_sizes) if chunk_sizes else 0,
-            'semantic_coherence': coherence
+            'semantic_coherence': coherence,
+            'used_cache': embeddings is not None
         }
 
         if self.show_details:
-            print(f" {len(chunks)} chunks, avg_size={np.mean(chunk_sizes):.0f}, coherence={coherence:.3f}")
+            cache_marker = " [CACHED]" if embeddings is not None else ""
+            print(f" {len(chunks)} chunks, avg_size={np.mean(chunk_sizes):.0f}, coherence={coherence:.3f}{cache_marker}")
 
         # 2. RETRIEVAL METRICS
         print("  [RETRIEVAL]", end="")
         retrieval_start = time.time()
 
-        # Index chunks
-        pipeline.retriever.index(chunks)
+        # Index chunks - with or without pre-computed embeddings
+        if embeddings is not None and hasattr(pipeline.retriever, 'index_with_embeddings'):
+            # Use cached embeddings if retriever supports it
+            pipeline.retriever.index_with_embeddings(chunks, embeddings)
+        else:
+            # Standard indexing (will compute embeddings internally)
+            pipeline.retriever.index(chunks)
 
         # Retrieve documents
         top_k = getattr(pipeline, 'top_k', 5)
@@ -377,8 +417,9 @@ class MSMARCODataLoader:
 class EnhancedPipelineBuilder:
     """Build pipelines with detailed configuration"""
 
-    def __init__(self, use_real_api: bool = False):
+    def __init__(self, use_real_api: bool = False, cache_manager=None):
         self.use_real_api = use_real_api and bool(os.getenv('OPENAI_API_KEY'))
+        self.cache_manager = cache_manager
 
     def build_pipeline(self, config: Dict[str, Any]) -> Any:
         """Build pipeline from configuration"""
@@ -399,14 +440,20 @@ class EnhancedPipelineBuilder:
                 'overlap': 50
             })
 
-        # Embedder
+        # Embedder (with optional caching)
         if self.use_real_api:
-            pipeline.embedder = OpenAIEmbedder({
+            base_embedder = OpenAIEmbedder({
                 'model': 'text-embedding-ada-002',
                 'api_key': os.getenv('OPENAI_API_KEY')
             })
         else:
-            pipeline.embedder = MockEmbedder({})
+            base_embedder = MockEmbedder({})
+
+        # Wrap with CachedEmbedder if cache manager is available
+        if self.cache_manager:
+            pipeline.embedder = CachedEmbedder(base_embedder, self.cache_manager)
+        else:
+            pipeline.embedder = base_embedder
 
         # Retriever
         retrieval_method = config.get('retrieval_method', 'dense')
@@ -487,13 +534,21 @@ class EnhancedPipelineBuilder:
 
 
 def run_enhanced_bayesian_optimization(n_calls: int = 30, use_real_api: bool = False,
-                                      num_docs: int = 20, num_queries: int = 5):
+                                      num_docs: int = 20, num_queries: int = 5,
+                                      use_cache: bool = True, cache_dir: str = '.embedding_cache',
+                                      cache_memory_limit: int = 1024, clear_cache: bool = False):
     """
     Run enhanced Bayesian optimization with detailed metrics
 
     Args:
         n_calls: Number of configurations to evaluate
         use_real_api: Whether to use real OpenAI API
+        num_docs: Number of documents to load
+        num_queries: Number of queries to evaluate
+        use_cache: Whether to use embedding cache
+        cache_dir: Directory for cache storage
+        cache_memory_limit: Max memory for cache in MB
+        clear_cache: Whether to clear cache before starting
     """
     print("\n" + "=" * 80)
     print("ENHANCED BAYESIAN OPTIMIZATION WITH MS MARCO")
@@ -531,9 +586,29 @@ def run_enhanced_bayesian_optimization(n_calls: int = 30, use_real_api: bool = F
     print(f"Bayesian Optimization: {n_calls} evaluations")
     print(f"Reduction: {(1 - n_calls/432)*100:.1f}%")
 
-    # Create evaluator
-    builder = EnhancedPipelineBuilder(use_real_api)
-    metrics_collector = EnhancedMetricsCollector(show_details=True)
+    # Create cache manager if enabled
+    cache_manager = None
+    if use_cache:
+        cache_manager = EmbeddingCacheManager(
+            cache_dir=cache_dir,
+            max_memory_mb=cache_memory_limit,
+            use_cache=True
+        )
+
+        if clear_cache:
+            print("\nClearing embedding cache...")
+            cache_manager.clear_cache()
+
+        print(f"\nCache Configuration:")
+        print(f"  Enabled: Yes")
+        print(f"  Directory: {cache_dir}")
+        print(f"  Memory Limit: {cache_memory_limit}MB")
+    else:
+        print(f"\nCache Configuration: Disabled")
+
+    # Create evaluator with cache manager
+    builder = EnhancedPipelineBuilder(use_real_api, cache_manager=cache_manager)
+    metrics_collector = EnhancedMetricsCollector(show_details=True, cache_manager=cache_manager)
 
     eval_count = [0]  # Use list to allow modification in nested function
 
@@ -664,6 +739,23 @@ def run_enhanced_bayesian_optimization(n_calls: int = 30, use_real_api: bool = F
     print(f"  This measures the typical performance across queries, ignoring outliers")
     print(f"  Median is more robust than mean for handling query difficulty variations")
 
+    # Display cache statistics if cache was used
+    if cache_manager:
+        cache_stats = cache_manager.get_cache_stats()
+        print(f"\n{'='*80}")
+        print("CACHE PERFORMANCE")
+        print(f"{'='*80}")
+        print(f"  Hit Rate: {cache_stats['hit_rate']:.1%}")
+        print(f"  Total Hits: {cache_stats['total_hits']}")
+        print(f"  Total Misses: {cache_stats['total_misses']}")
+        print(f"  Embeddings Computed: {cache_stats['embeddings_computed']:,}")
+        print(f"  Embeddings Cached: {cache_stats['embeddings_cached']:,}")
+        print(f"  Estimated Cost Saved: ${cache_stats['estimated_cost_saved']:.4f}")
+        print(f"  Time Saved: {cache_stats['time_saved_seconds']:.1f}s")
+        print(f"  Memory Cache Size: {cache_stats['memory_cache_size']} entries")
+        print(f"  Disk Cache Size: {cache_stats['disk_cache_size']} entries")
+        print(f"  Current Memory Usage: {cache_stats['memory_usage_mb']:.1f}MB")
+
     # Save results
     # Convert numpy types to JSON-serializable types
     def make_serializable(obj):
@@ -712,6 +804,18 @@ if __name__ == "__main__":
     parser.add_argument('--num-queries', type=int, default=5,
                        help='Number of queries to evaluate per configuration (default: 5)')
 
+    # Cache-related arguments
+    parser.add_argument('--use-cache', action='store_true', default=True,
+                       help='Enable embedding cache (default: True)')
+    parser.add_argument('--no-cache', dest='use_cache', action='store_false',
+                       help='Disable embedding cache')
+    parser.add_argument('--cache-dir', type=str, default='.embedding_cache',
+                       help='Directory for persistent cache storage (default: .embedding_cache)')
+    parser.add_argument('--cache-memory-limit', type=int, default=1024,
+                       help='Maximum memory for cache in MB (default: 1024)')
+    parser.add_argument('--clear-cache', action='store_true',
+                       help='Clear cache before starting optimization')
+
     args = parser.parse_args()
 
     # Install rouge-score if needed
@@ -725,7 +829,11 @@ if __name__ == "__main__":
         n_calls=args.n_calls,
         use_real_api=args.real_api,
         num_docs=args.num_docs,
-        num_queries=args.num_queries
+        num_queries=args.num_queries,
+        use_cache=args.use_cache,
+        cache_dir=args.cache_dir,
+        cache_memory_limit=args.cache_memory_limit,
+        clear_cache=args.clear_cache
     )
 
     print("\n" + "=" * 80)

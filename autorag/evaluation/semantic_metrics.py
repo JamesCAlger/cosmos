@@ -11,23 +11,30 @@ import time
 class SemanticMetrics:
     """Calculate semantic similarity-based metrics instead of token-level metrics"""
 
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2',
-                 similarity_threshold: float = 0.7,
-                 batch_size: int = 32):
+    def __init__(self, model_name: str = 'sentence-transformers/all-mpnet-base-v2',
+                 similarity_threshold: float = None,
+                 batch_size: int = 32,
+                 use_continuous_scores: bool = True):
         """
         Initialize semantic metrics evaluator
 
         Args:
             model_name: Sentence transformer model to use
-            similarity_threshold: Threshold for considering answers semantically equivalent
+            similarity_threshold: Optional threshold for binary classification (deprecated)
             batch_size: Batch size for encoding
+            use_continuous_scores: If True, return raw similarity scores (better for optimization)
         """
         logger.info(f"Initializing Semantic Metrics with model: {model_name}")
         self.model = SentenceTransformer(model_name)
         self.similarity_threshold = similarity_threshold
         self.batch_size = batch_size
+        self.use_continuous_scores = use_continuous_scores
         self.cache = {}  # Cache for embeddings
-        logger.info(f"Semantic similarity threshold: {similarity_threshold}")
+
+        if similarity_threshold is not None and use_continuous_scores:
+            logger.warning("Threshold provided but continuous scores enabled - threshold will be ignored for scoring")
+
+        logger.info(f"Model: {model_name}, Continuous scores: {use_continuous_scores}")
 
     def encode_with_cache(self, texts: List[str], prefix: str = "") -> np.ndarray:
         """Encode texts with caching to avoid re-computation"""
@@ -91,6 +98,22 @@ class SemanticMetrics:
 
         return similarities
 
+    def similarity_score(self, prediction: str, ground_truth: str) -> float:
+        """
+        Compute raw similarity score for a single prediction-truth pair.
+        This is the primary method for Bayesian optimization.
+
+        Args:
+            prediction: Generated answer
+            ground_truth: Expected answer
+
+        Returns:
+            Continuous similarity score in [0, 1]
+        """
+        pred_emb = self.encode_with_cache([prediction], prefix="pred")[0]
+        truth_emb = self.encode_with_cache([ground_truth], prefix="truth")[0]
+        return float(self.compute_similarity(pred_emb, truth_emb))
+
     def classify_semantic_match(self, similarities: List[float]) -> List[bool]:
         """
         Classify predictions as correct/incorrect based on semantic similarity
@@ -121,57 +144,58 @@ class SemanticMetrics:
 
         # Compute semantic similarities
         similarities = self.semantic_similarity_batch(predictions, ground_truths)
-
-        # Classify as correct/incorrect based on threshold
-        semantic_matches = self.classify_semantic_match(similarities)
-
-        # Calculate accuracy (what percentage are semantically equivalent)
-        semantic_accuracy = sum(semantic_matches) / len(semantic_matches)
-
-        # For precision/recall/F1, we need to define positive and negative classes
-        # Let's consider: positive = answer is semantically correct
-        # For this, we'll treat each answer as a binary classification
-
-        # Create binary labels (all ground truths are "positive" examples)
-        y_true = [1] * len(ground_truths)  # All ground truths are correct
-        y_pred = [1 if match else 0 for match in semantic_matches]  # Predicted as correct if similar
-
-        # Calculate precision, recall, F1
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true, y_pred, average='binary', zero_division=0
-        )
-
-        # Additional statistics
         similarities_array = np.array(similarities)
 
         results = {
-            # Main metrics
-            "semantic_accuracy": semantic_accuracy,
-            "semantic_precision": float(precision),
-            "semantic_recall": float(recall),
-            "semantic_f1": float(f1),
-
-            # Similarity statistics
+            # Primary metric for optimization (continuous)
             "similarity_mean": float(similarities_array.mean()),
+
+            # Additional statistics
             "similarity_std": float(similarities_array.std()),
             "similarity_min": float(similarities_array.min()),
             "similarity_max": float(similarities_array.max()),
             "similarity_median": float(np.median(similarities_array)),
 
-            # Threshold info
-            "similarity_threshold": self.similarity_threshold,
-            "num_semantic_matches": sum(semantic_matches),
+            # Distribution info
+            "similarity_q25": float(np.percentile(similarities_array, 25)),
+            "similarity_q75": float(np.percentile(similarities_array, 75)),
+
+            # Sample info
             "num_samples": len(predictions),
 
             # Per-sample details (for analysis)
             "per_sample_similarities": similarities,
-            "per_sample_matches": semantic_matches
         }
 
+        # Optionally add threshold-based metrics if threshold is provided
+        if self.similarity_threshold is not None and not self.use_continuous_scores:
+            semantic_matches = self.classify_semantic_match(similarities)
+            semantic_accuracy = sum(semantic_matches) / len(semantic_matches)
+
+            y_true = [1] * len(ground_truths)
+            y_pred = [1 if match else 0 for match in semantic_matches]
+
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                y_true, y_pred, average='binary', zero_division=0
+            )
+
+            results.update({
+                "semantic_accuracy": semantic_accuracy,
+                "semantic_precision": float(precision),
+                "semantic_recall": float(recall),
+                "semantic_f1": float(f1),
+                "similarity_threshold": self.similarity_threshold,
+                "num_semantic_matches": sum(semantic_matches),
+                "per_sample_matches": semantic_matches
+            })
+
+            logger.info(f"  Accuracy: {semantic_accuracy:.3f} ({sum(semantic_matches)}/{len(semantic_matches)} matches)")
+            logger.info(f"  F1 Score: {f1:.3f}")
+
         logger.info(f"Semantic evaluation complete:")
-        logger.info(f"  Accuracy: {semantic_accuracy:.3f} ({sum(semantic_matches)}/{len(semantic_matches)} matches)")
         logger.info(f"  Mean similarity: {similarities_array.mean():.3f}")
-        logger.info(f"  F1 Score: {f1:.3f}")
+        logger.info(f"  Median similarity: {np.median(similarities_array):.3f}")
+        logger.info(f"  Std deviation: {similarities_array.std():.3f}")
 
         return results
 

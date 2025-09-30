@@ -217,6 +217,22 @@ class HybridRetriever(Retriever):
         if self.sparse_retriever and hasattr(self.sparse_retriever, 'index'):
             self.sparse_retriever.index(chunks)
 
+    def index_with_embeddings(self, chunks: List[Chunk], embeddings: List[List[float]]) -> None:
+        """Index chunks with pre-computed embeddings (for cache optimization)"""
+        # Use cached embeddings for dense retriever
+        if self.dense_retriever and hasattr(self.dense_retriever, 'index_with_embeddings'):
+            self.dense_retriever.index_with_embeddings(chunks, embeddings)
+        elif self.dense_retriever and hasattr(self.dense_retriever, 'index'):
+            # Fallback to regular indexing if method not available
+            logger.warning("Dense retriever doesn't support index_with_embeddings, falling back to regular index")
+            self.dense_retriever.index(chunks)
+
+        # Sparse retriever doesn't use embeddings, so use regular indexing
+        if self.sparse_retriever and hasattr(self.sparse_retriever, 'index'):
+            self.sparse_retriever.index(chunks)
+
+        logger.info(f"Hybrid retriever indexed {len(chunks)} chunks with cached embeddings")
+
     def clear(self) -> None:
         """Clear both retrievers"""
         if self.dense_retriever and hasattr(self.dense_retriever, 'clear'):

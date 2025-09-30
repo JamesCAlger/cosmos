@@ -41,6 +41,18 @@ class DenseRetriever(Retriever):
 
         logger.info(f"Indexed {len(chunks)} chunks in dense retriever")
 
+    def index_with_embeddings(self, chunks: List[Chunk], embeddings: List[List[float]]) -> None:
+        """Index chunks with pre-computed embeddings (for cache optimization)"""
+        if not self.vector_store:
+            raise ValueError("Vector store must be set before indexing")
+
+        self.chunks = chunks
+
+        # Directly store pre-computed embeddings with chunks
+        self.vector_store.add(embeddings, chunks)
+
+        logger.info(f"Indexed {len(chunks)} chunks with pre-computed embeddings")
+
     def add_documents(self, documents: List[Document]) -> None:
         """Add documents to the index (convert to chunks first)"""
         # Simple chunking for documents (this would normally use a chunker)
