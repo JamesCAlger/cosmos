@@ -1,0 +1,3 @@
+"""
+COSMOS Framework Tests
+"""
