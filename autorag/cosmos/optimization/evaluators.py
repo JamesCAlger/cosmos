@@ -109,7 +109,10 @@ class ComponentEvaluator:
                  component_type: str,
                  test_data: Dict[str, Any],
                  metric_collector: ComponentMetrics,
-                 upstream_components: Optional[Dict[str, Any]] = None):
+                 upstream_components: Optional[Dict[str, Any]] = None,
+                 max_queries: int = 10,
+                 cache_manager: Optional[Any] = None,
+                 dataset_name: Optional[str] = None):
         """
         Initialize component evaluator
 
@@ -120,15 +123,48 @@ class ComponentEvaluator:
             upstream_components: Dict of already-optimized upstream components
                                 Keys: component types ('chunker', 'retriever')
                                 Values: Component instances
+            max_queries: Maximum number of queries to use for evaluation (default: 10)
+            cache_manager: Optional EmbeddingCacheManager for caching embeddings
+            dataset_name: Name of dataset being used (e.g., 'marco', 'beir/scifact')
         """
         self.component_type = component_type
         self.test_data = test_data
         self.metric_collector = metric_collector
         self.upstream_components = upstream_components or {}
+        self.max_queries = max_queries
+        self.cache_manager = cache_manager
+        self.dataset_name = dataset_name or test_data.get('dataset_name', 'unknown')
+        self.dataset_size = len(test_data.get('documents', []))
 
         logger.info(f"ComponentEvaluator initialized for {component_type}")
         if upstream_components:
             logger.info(f"  Using upstream: {list(upstream_components.keys())}")
+        logger.debug(f"  Max queries for evaluation: {max_queries}")
+        if cache_manager:
+            logger.info(f"  Cache enabled: dataset={self.dataset_name}, size={self.dataset_size}")
+
+    def _get_cache_config(self, component_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert COSMOS component config to cache manager config format
+
+        Args:
+            component_config: COSMOS component configuration
+
+        Returns:
+            Cache manager compatible configuration
+        """
+        # Map COSMOS chunking config to cache format
+        cache_config = {
+            'strategy': component_config.get('chunking_strategy', 'fixed'),
+            'chunk_size': component_config.get('chunk_size', 512),
+            'overlap': component_config.get('overlap', 0),
+        }
+
+        # Add semantic threshold if applicable
+        if cache_config['strategy'] == 'semantic':
+            cache_config['threshold'] = component_config.get('threshold', 0.5)
+
+        return cache_config
 
     def evaluate(self, config: Dict[str, Any]) -> float:
         """
@@ -220,17 +256,35 @@ class ComponentEvaluator:
             retriever = build_component('retriever', config)
 
             # Set up embedder for retriever
-            use_real_api = config.get('use_real_api', False)
+            # Default to real API if available, otherwise use mock
+            use_real_api = config.get('use_real_api', True)  # Changed default to True
+
             if use_real_api:
-                from autorag.components.embedders.openai import OpenAIEmbedder
                 import os
-                embedder = OpenAIEmbedder({
-                    'model': 'text-embedding-ada-002',
-                    'api_key': os.getenv('OPENAI_API_KEY')
-                })
+                api_key = os.getenv('OPENAI_API_KEY')
+
+                if api_key:
+                    from autorag.components.embedders.openai import OpenAIEmbedder
+                    from autorag.components.embedders.cached import CachedEmbedder
+
+                    # Create real embedder
+                    real_embedder = OpenAIEmbedder({
+                        'model': 'text-embedding-ada-002',
+                        'api_key': api_key
+                    })
+
+                    # Wrap with caching to avoid redundant API calls during optimization
+                    embedder = CachedEmbedder(real_embedder)
+                    logger.info("Using OpenAI embeddings with caching")
+                else:
+                    # Fallback to mock if API key not available
+                    from autorag.components.embedders.mock import MockEmbedder
+                    embedder = MockEmbedder({})
+                    logger.warning("OpenAI API key not found, falling back to mock embeddings")
             else:
                 from autorag.components.embedders.mock import MockEmbedder
                 embedder = MockEmbedder({})
+                logger.debug("Using mock embeddings (explicitly disabled real API)")
 
             # Set embedder and vector store for retriever
             from autorag.components.vector_stores.simple import SimpleVectorStore
@@ -245,31 +299,88 @@ class ComponentEvaluator:
             # Wrap with COSMOS
             cosmos_retriever = COSMOSComponent(retriever, 'retriever', self.metric_collector)
 
-            # Chunk documents using upstream chunker
-            documents = self.test_data.get('documents', [])[:10]
-            doc_objects = [Document(content=doc, doc_id=str(i)) for i, doc in enumerate(documents)]
-            chunks = chunker.chunk(doc_objects)
+            # Get all documents (not just first 10 - we want full dataset for caching)
+            documents = self.test_data.get('documents', [])
+
+            # Use cache manager if available
+            if self.cache_manager and config.get('retrieval_method') == 'dense':
+                logger.debug("Using cache manager for chunking and embedding")
+
+                # Extract chunker configuration for caching
+                from autorag.components.chunkers.semantic import SemanticChunker
+                chunker_config = {
+                    'strategy': 'semantic' if isinstance(chunker, SemanticChunker) else 'fixed',
+                    'chunk_size': getattr(chunker, 'chunk_size', 512),
+                    'overlap': getattr(chunker, 'overlap', 0),
+                }
+                if isinstance(chunker, SemanticChunker):
+                    chunker_config['threshold'] = getattr(chunker, 'threshold', 0.5)
+
+                # Get cached or compute embeddings
+                chunks, embeddings = self.cache_manager.get_or_compute_embeddings(
+                    documents,
+                    chunker_config,
+                    embedder,
+                    chunker,
+                    dataset_name=self.dataset_name,
+                    dataset_size=self.dataset_size
+                )
+
+                # Index with pre-computed embeddings
+                retriever.index_with_embeddings(chunks, embeddings)
+                logger.debug(f"Indexed {len(chunks)} chunks using cached embeddings")
+            else:
+                # Original flow without caching
+                doc_objects = [Document(content=doc, doc_id=str(i)) for i, doc in enumerate(documents)]
+                chunks = chunker.chunk(doc_objects)
+
+                # Index chunks (will compute embeddings internally)
+                retriever.index(chunks)
+                logger.debug(f"Indexed {len(chunks)} chunks without caching")
+
+            # Build mapping from doc_id to chunk_ids for ground truth
+            doc_to_chunks = {}
+            for chunk in chunks:
+                doc_id = chunk.doc_id if hasattr(chunk, 'doc_id') else str(chunk)
+                chunk_id = chunk.chunk_id if hasattr(chunk, 'chunk_id') else str(chunk)
+                if doc_id not in doc_to_chunks:
+                    doc_to_chunks[doc_id] = []
+                doc_to_chunks[doc_id].append(chunk_id)
 
             # Index chunks
             retriever.index(chunks)
 
-            # Evaluate on queries
-            queries = self.test_data.get('queries', [])[:5]  # Limit for speed
+            # Evaluate on queries (limit for speed and cost)
+            queries = self.test_data.get('queries', [])[:self.max_queries]
             quality_scores = []
 
             for query_data in queries:
                 if isinstance(query_data, dict):
                     query = query_data.get('query', query_data.get('question', ''))
+                    # Extract relevant document IDs if available (for precision calculation)
+                    relevant_doc_ids = query_data.get('relevant_doc_ids', [])
                 else:
                     query = str(query_data)
+                    relevant_doc_ids = []
 
                 if not query:
                     continue
 
+                # Map relevant doc IDs to chunk IDs
+                relevant_chunk_ids = []
+                for doc_id in relevant_doc_ids:
+                    doc_id_str = str(doc_id)
+                    if doc_id_str in doc_to_chunks:
+                        relevant_chunk_ids.extend(doc_to_chunks[doc_id_str])
+
+                # Prepare ground truth for metrics
+                ground_truth = {'relevant_chunks': relevant_chunk_ids} if relevant_chunk_ids else None
+
                 # Retrieve with metrics
                 results, metrics = cosmos_retriever.process_with_metrics(
                     query,
-                    top_k=config.get('retrieval_top_k', 5)
+                    top_k=config.get('retrieval_top_k', 5),
+                    ground_truth=ground_truth
                 )
 
                 # Compute quality
@@ -323,6 +434,38 @@ class ComponentEvaluator:
             else:
                 retriever = self.upstream_components['retriever']
 
+                # FIX: Upstream retriever needs embedder and vector store configured
+                # The retriever component doesn't persist these dependencies, so we must set them up
+                if hasattr(retriever, 'set_components') or hasattr(retriever, 'embedder'):
+                    import os
+                    api_key = os.getenv('OPENAI_API_KEY')
+
+                    if api_key:
+                        from autorag.components.embedders.openai import OpenAIEmbedder
+                        from autorag.components.embedders.cached import CachedEmbedder
+
+                        # Create real embedder with caching
+                        real_embedder = OpenAIEmbedder({
+                            'model': 'text-embedding-ada-002',
+                            'api_key': api_key
+                        })
+                        embedder = CachedEmbedder(real_embedder)
+                        logger.info("Generator eval: Using OpenAI embeddings with caching for upstream retriever")
+                    else:
+                        from autorag.components.embedders.mock import MockEmbedder
+                        embedder = MockEmbedder({})
+                        logger.warning("Generator eval: OpenAI API key not found, using mock embeddings")
+
+                    from autorag.components.vector_stores.simple import SimpleVectorStore
+                    vector_store = SimpleVectorStore({})
+
+                    # Set components on retriever
+                    if hasattr(retriever, 'set_components'):
+                        retriever.set_components(embedder, vector_store)
+                    elif hasattr(retriever, 'embedder'):
+                        retriever.embedder = embedder
+                        retriever.vector_store = vector_store
+
             # Build generator from config
             generator = build_component('generator', config)
 
@@ -335,8 +478,8 @@ class ComponentEvaluator:
             chunks = chunker.chunk(doc_objects)
             retriever.index(chunks)
 
-            # Evaluate on queries with ground truth
-            queries = self.test_data.get('queries', [])[:5]
+            # Evaluate on queries with ground truth (limit for speed and cost)
+            queries = self.test_data.get('queries', [])[:self.max_queries]
             quality_scores = []
 
             for query_data in queries:
