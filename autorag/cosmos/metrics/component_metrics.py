@@ -182,7 +182,12 @@ class ComponentMetrics:
                 precision = len(relevant_indices & retrieved_indices) / len(retrieved_indices)
         else:
             # Use semantic similarity as proxy for precision
-            precision = float(np.mean([s for s in relevance_scores if s > 0.7]))
+            # Count proportion of retrieved docs with high relevance (> 0.7)
+            if relevance_scores:
+                high_relevance_count = sum(1 for s in relevance_scores if s > 0.7)
+                precision = float(high_relevance_count) / len(relevance_scores)
+            else:
+                precision = 0.0
 
         metrics = {
             'time': float(latency),
@@ -349,7 +354,8 @@ class ComponentMetrics:
         else:
             raise ValueError(f"Unknown component type: {component_type}")
 
-        # Ensure score is in [0, 1]
-        quality = max(0.0, min(1.0, quality))
+        # Ensure score is in [0, 1], handling NaN values properly
+        # NaN values are converted to 0.0 (failed evaluation)
+        quality = float(np.clip(np.nan_to_num(quality, nan=0.0), 0.0, 1.0))
 
-        return float(quality)
+        return quality

@@ -446,6 +446,704 @@ class MultiFidelityOptimizer:
         return best
 ```
 
+## Architecture Search: Beyond Parameter Optimization
+
+**Status**: Future research direction extending COSMOS from parameter optimization to structure discovery.
+
+### The Architecture Search Problem
+
+Current COSMOS optimizes **parameters** for a **predefined structure**:
+- Input: chunker → retriever → generator (fixed)
+- Output: Best chunk_size, top_k, temperature, etc.
+
+**Architecture Search Goal**: Discover **optimal structure** + parameters:
+- Input: Component library + objective
+- Output: Which components? In what order? With what parameters?
+
+### Why Architecture Search Matters
+
+**Example: Document Processing Pipeline**
+- Available components: {text_extractor[A,B], image_extractor[A,B], chunker[A,B]}
+- Unknown: Should we use text-only? Image-only? Both sequentially? Both in parallel?
+- Parameter optimization assumes structure is known; architecture search discovers it
+
+**Example: Fact-Checking System**
+- Available: {retriever, web_search, knowledge_base, llm_judge, human_in_loop, confidence_scorer}
+- Legal domain may need: retriever → knowledge_base → llm_judge
+- Education domain may need: web_search → confidence_scorer → human_in_loop
+- Architecture search finds optimal structure per use case
+
+### 4. Evolutionary/Genetic Algorithms for Architecture Search
+
+**Concept**: Maintain population of pipeline structures. Evolve via genetic operators (crossover, mutation, selection).
+
+#### Methodology
+
+**Initialization**: Generate random population of N structures
+```python
+population = [
+    Pipeline([TextExtractor, Chunker, Retriever]),
+    Pipeline([ImageExtractor, Chunker, Retriever]),
+    Pipeline([TextExtractor, ImageExtractor, Merge, Chunker, Retriever]),
+    # ... N-3 more random structures
+]
+```
+
+**Each Generation**:
+1. **Evaluate fitness** (performance) of each structure
+2. **Select top K performers** (elites)
+3. **Generate offspring via crossover**:
+   - Parent A: TextExtractor → Chunker
+   - Parent B: ImageExtractor → Merge → Chunker
+   - Child: TextExtractor → Merge → Chunker
+4. **Apply mutations**:
+   - Add component
+   - Remove component
+   - Replace component
+   - Swap order
+5. **New population** = elites + offspring
+
+Repeat 50-100 generations
+
+#### Implementation Architecture
+
+```python
+class EvolutionaryArchitectureSearch:
+    """Evolutionary algorithm for discovering optimal pipeline structures"""
+
+    def __init__(self,
+                 component_library: Dict[str, Type[COSMOSComponent]],
+                 population_size: int = 50,
+                 mutation_rate: float = 0.15,
+                 elite_fraction: float = 0.2):
+        self.library = component_library
+        self.population_size = population_size
+        self.mutation_rate = mutation_rate
+        self.n_elites = int(population_size * elite_fraction)
+
+    def initialize_population(self) -> List[PipelineStructure]:
+        """Generate random valid pipelines"""
+        population = []
+        for _ in range(self.population_size):
+            # Sample 2-5 components
+            n_components = random.randint(2, 5)
+            components = random.sample(list(self.library.keys()), n_components)
+
+            # Validate composition (check interfaces)
+            pipeline = PipelineStructure(components)
+            if pipeline.is_valid():
+                population.append(pipeline)
+
+        return population
+
+    def evaluate_fitness(self, pipeline: PipelineStructure, test_data) -> float:
+        """
+        Evaluate pipeline performance
+
+        Returns:
+            Fitness score combining accuracy, latency, cost
+        """
+        # Build pipeline with COSMOS components
+        built_pipeline = self.build_pipeline(pipeline)
+
+        # Optimize parameters for this structure (mini COSMOS optimization)
+        optimized = self.optimize_parameters(built_pipeline, budget=20)
+
+        # Evaluate on test data
+        accuracy = optimized.evaluate(test_data)
+        latency = optimized.average_latency
+        cost = optimized.total_cost
+
+        # Multi-objective fitness
+        fitness = (
+            0.6 * accuracy +
+            0.2 * (1.0 / (1.0 + latency)) +
+            0.2 * (1.0 / (1.0 + cost))
+        )
+
+        return fitness
+
+    def crossover(self, parent1: PipelineStructure,
+                        parent2: PipelineStructure) -> PipelineStructure:
+        """
+        Genetic crossover: combine two parent pipelines
+
+        Strategy: Take prefix from parent1, suffix from parent2
+        """
+        # Find compatible crossover point
+        for i in range(1, min(len(parent1.components), len(parent2.components))):
+            # Check if parent1[:i] output matches parent2[i] input
+            if self.interfaces_compatible(parent1.components[i-1],
+                                          parent2.components[i]):
+                # Combine
+                child_components = parent1.components[:i] + parent2.components[i:]
+                child = PipelineStructure(child_components)
+
+                if child.is_valid():
+                    return child
+
+        # Fallback: return parent1
+        return parent1
+
+    def mutate(self, pipeline: PipelineStructure) -> PipelineStructure:
+        """
+        Genetic mutation: randomly modify pipeline
+
+        Mutations:
+        - Add component
+        - Remove component
+        - Replace component
+        - Swap adjacent components
+        """
+        if random.random() > self.mutation_rate:
+            return pipeline  # No mutation
+
+        mutation_type = random.choice(['add', 'remove', 'replace', 'swap'])
+
+        if mutation_type == 'add':
+            # Add random component at random position
+            new_component = random.choice(list(self.library.keys()))
+            position = random.randint(0, len(pipeline.components))
+            new_components = (
+                pipeline.components[:position] +
+                [new_component] +
+                pipeline.components[position:]
+            )
+
+        elif mutation_type == 'remove' and len(pipeline.components) > 2:
+            # Remove random component (keep at least 2)
+            position = random.randint(0, len(pipeline.components) - 1)
+            new_components = (
+                pipeline.components[:position] +
+                pipeline.components[position+1:]
+            )
+
+        elif mutation_type == 'replace':
+            # Replace random component
+            position = random.randint(0, len(pipeline.components) - 1)
+            new_component = random.choice(list(self.library.keys()))
+            new_components = (
+                pipeline.components[:position] +
+                [new_component] +
+                pipeline.components[position+1:]
+            )
+
+        else:  # swap
+            if len(pipeline.components) >= 2:
+                i = random.randint(0, len(pipeline.components) - 2)
+                new_components = pipeline.components.copy()
+                new_components[i], new_components[i+1] = new_components[i+1], new_components[i]
+            else:
+                new_components = pipeline.components
+
+        mutated = PipelineStructure(new_components)
+        return mutated if mutated.is_valid() else pipeline
+
+    def search(self, test_data, generations: int = 50) -> PipelineStructure:
+        """
+        Run evolutionary search
+
+        Args:
+            test_data: Evaluation dataset
+            generations: Number of evolution cycles
+
+        Returns:
+            Best pipeline structure found
+        """
+        # Initialize population
+        population = self.initialize_population()
+
+        best_ever = None
+        best_fitness = 0.0
+
+        for generation in range(generations):
+            # Evaluate fitness
+            fitness_scores = [
+                (pipeline, self.evaluate_fitness(pipeline, test_data))
+                for pipeline in population
+            ]
+
+            # Sort by fitness
+            fitness_scores.sort(key=lambda x: x[1], reverse=True)
+
+            # Track best
+            if fitness_scores[0][1] > best_fitness:
+                best_ever = fitness_scores[0][0]
+                best_fitness = fitness_scores[0][1]
+
+            logger.info(f"Generation {generation}: Best fitness = {best_fitness:.3f}")
+
+            # Selection: Keep elites
+            elites = [pipeline for pipeline, _ in fitness_scores[:self.n_elites]]
+
+            # Generate offspring
+            offspring = []
+            while len(offspring) < self.population_size - self.n_elites:
+                # Tournament selection for parents
+                parent1 = self.tournament_select(fitness_scores)
+                parent2 = self.tournament_select(fitness_scores)
+
+                # Crossover
+                child = self.crossover(parent1, parent2)
+
+                # Mutation
+                child = self.mutate(child)
+
+                offspring.append(child)
+
+            # New population
+            population = elites + offspring
+
+        return best_ever
+
+    def tournament_select(self, fitness_scores, k: int = 3) -> PipelineStructure:
+        """Select parent via tournament selection"""
+        tournament = random.sample(fitness_scores, k)
+        winner = max(tournament, key=lambda x: x[1])
+        return winner[0]
+```
+
+#### Computational Cost
+
+- **Budget**: Population_size × generations × evaluations_per_structure
+- **Example**: 50 population × 50 generations × 1 eval = 2500 evaluations
+- **Parallelizable within generation** (all population members evaluated concurrently)
+- Each evaluation includes mini parameter optimization (20 evals)
+- **Total**: 2500 × 20 = 50,000 parameter evaluations
+
+#### Pros & Cons
+
+**Pros:**
+✅ No gradient computation needed
+✅ Handles discrete structure choices naturally
+✅ Maintains diversity through population
+✅ Less prone to local optima than RL
+✅ Simpler than RL (no neural networks)
+✅ Proven in NAS (NEAT, AmoebaNet)
+
+**Cons:**
+❌ Still very computationally expensive
+❌ Requires careful tuning (mutation rates, selection pressure)
+❌ Crossover may produce invalid structures
+❌ Population size × generations = many evaluations
+❌ No clear convergence criteria
+
+#### When to Use
+
+- Similar to RL but prefer simpler implementation
+- Team familiar with evolutionary algorithms
+- Discrete structure choices (vs continuous parameters)
+- Budget for 1000-3000 evaluations
+- Medium to large projects (2-4 weeks implementation)
+
+### 5. Reinforcement Learning for Architecture Search
+
+**Concept**: Treat structure discovery as sequential decision problem. Neural network "controller" learns to build pipelines through trial and error.
+
+#### Methodology
+
+**Setup:**
+- **State**: Current partial pipeline (e.g., [TextExtractor, Chunker, ?])
+- **Action**: Add next component (e.g., add DenseRetriever)
+- **Reward**: Final pipeline performance (accuracy on validation set)
+
+**Training Loop:**
+1. **Controller network generates structure**
+   - At each step, output probability distribution over components
+   - Sample action (which component to add next)
+   - Continue until terminal state (valid pipeline or max length)
+
+2. **Optimize parameters for that structure**
+   - Use COSMOS parameter optimization on generated structure
+   - Get best accuracy for this structure
+
+3. **Evaluate performance → reward**
+   - R = accuracy (or multi-objective score)
+   - Assign reward to structure
+
+4. **Update controller via REINFORCE**
+   - Gradient: ∇log π(a|s) × (R - baseline)
+   - Favor high-reward actions
+   - Penalize low-reward actions
+
+After many iterations, controller learns patterns like:
+- "TextExtractor + ImageExtractor → use Merge"
+- "High image content → prioritize OCR quality"
+- "Legal documents → add validation component"
+
+#### Implementation Architecture
+
+```python
+class RLArchitectureSearch:
+    """Reinforcement learning for discovering optimal architectures"""
+
+    def __init__(self,
+                 component_library: Dict[str, Type[COSMOSComponent]],
+                 state_dim: int = 64,
+                 hidden_dim: int = 128,
+                 learning_rate: float = 1e-3):
+        self.library = component_library
+        self.component_list = list(component_library.keys())
+        self.n_components = len(self.component_list)
+
+        # Controller network (LSTM + softmax)
+        self.controller = ControllerNetwork(
+            component_embedding_dim=state_dim,
+            hidden_dim=hidden_dim,
+            output_dim=self.n_components + 1  # +1 for STOP token
+        )
+
+        self.optimizer = Adam(self.controller.parameters(), lr=learning_rate)
+        self.baseline = ExponentialMovingAverage(decay=0.95)
+
+    def encode_state(self, partial_pipeline: List[str]) -> torch.Tensor:
+        """
+        Encode current partial pipeline as state vector
+
+        Uses learned embeddings for each component type
+        """
+        if not partial_pipeline:
+            # Empty pipeline → zero state
+            return torch.zeros(1, self.controller.state_dim)
+
+        # Get embeddings for each component
+        embeddings = [self.controller.component_embeddings[comp]
+                     for comp in partial_pipeline]
+
+        # Aggregate via mean pooling
+        state = torch.stack(embeddings).mean(dim=0, keepdim=True)
+
+        return state
+
+    def sample_action(self, state: torch.Tensor,
+                           partial_pipeline: List[str]) -> Tuple[int, float]:
+        """
+        Sample next component to add
+
+        Returns:
+            (action_idx, log_prob) where action_idx ∈ [0, n_components]
+            action_idx = n_components means STOP (terminal)
+        """
+        # Forward pass through controller
+        logits = self.controller(state)
+
+        # Mask invalid actions (interface incompatible)
+        mask = self.get_action_mask(partial_pipeline)
+        logits = logits.masked_fill(~mask, float('-inf'))
+
+        # Sample from distribution
+        probs = F.softmax(logits, dim=-1)
+        action = torch.multinomial(probs, 1).item()
+        log_prob = torch.log(probs[0, action])
+
+        return action, log_prob
+
+    def get_action_mask(self, partial_pipeline: List[str]) -> torch.Tensor:
+        """
+        Mask invalid actions based on interface compatibility
+
+        Returns:
+            Boolean mask [n_components + 1] where True = valid action
+        """
+        mask = torch.ones(self.n_components + 1, dtype=torch.bool)
+
+        if not partial_pipeline:
+            # First component: allow any
+            mask[-1] = False  # Can't STOP on empty pipeline
+            return mask
+
+        # Check interface compatibility with last component
+        last_component_type = partial_pipeline[-1]
+        last_output_type = self.library[last_component_type].output_type
+
+        for i, comp_name in enumerate(self.component_list):
+            comp_input_type = self.library[comp_name].input_type
+
+            # Mask if input type doesn't match output type
+            if comp_input_type != last_output_type:
+                mask[i] = False
+
+        # Allow STOP if pipeline has ≥2 components
+        if len(partial_pipeline) < 2:
+            mask[-1] = False
+
+        return mask
+
+    def generate_structure(self) -> Tuple[PipelineStructure, List[float]]:
+        """
+        Generate pipeline structure by sampling from controller
+
+        Returns:
+            (pipeline, log_probs) where log_probs tracks action probabilities
+        """
+        partial_pipeline = []
+        log_probs = []
+
+        for step in range(10):  # Max 10 components
+            state = self.encode_state(partial_pipeline)
+            action, log_prob = self.sample_action(state, partial_pipeline)
+
+            log_probs.append(log_prob)
+
+            # Check if STOP action
+            if action == self.n_components:
+                break
+
+            # Add component
+            component_name = self.component_list[action]
+            partial_pipeline.append(component_name)
+
+        pipeline = PipelineStructure(partial_pipeline)
+        return pipeline, log_probs
+
+    def evaluate_structure(self, pipeline: PipelineStructure, test_data) -> float:
+        """
+        Evaluate generated structure
+
+        1. Optimize parameters with COSMOS (budget=20)
+        2. Measure accuracy on validation set
+        """
+        # Build pipeline with COSMOS components
+        built_pipeline = self.build_pipeline(pipeline)
+
+        # Parameter optimization
+        optimized = self.optimize_parameters(built_pipeline, budget=20)
+
+        # Evaluate
+        accuracy = optimized.evaluate(test_data)
+
+        return accuracy
+
+    def train_step(self, test_data) -> Dict[str, float]:
+        """
+        Single RL training step
+
+        1. Generate structure
+        2. Evaluate (reward)
+        3. Update controller
+        """
+        # Generate structure
+        pipeline, log_probs = self.generate_structure()
+
+        # Evaluate
+        reward = self.evaluate_structure(pipeline, test_data)
+
+        # Update baseline (moving average of rewards)
+        self.baseline.update(reward)
+        advantage = reward - self.baseline.value
+
+        # REINFORCE gradient
+        policy_loss = 0
+        for log_prob in log_probs:
+            policy_loss += -log_prob * advantage
+
+        # Backprop
+        self.optimizer.zero_grad()
+        policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.controller.parameters(), 1.0)
+        self.optimizer.step()
+
+        return {
+            'reward': reward,
+            'baseline': self.baseline.value,
+            'advantage': advantage,
+            'loss': policy_loss.item()
+        }
+
+    def search(self, test_data, n_iterations: int = 1000) -> PipelineStructure:
+        """
+        Train controller to discover optimal architectures
+
+        Args:
+            test_data: Evaluation dataset
+            n_iterations: Number of training iterations
+
+        Returns:
+            Best pipeline structure found
+        """
+        best_pipeline = None
+        best_reward = 0.0
+
+        for iteration in range(n_iterations):
+            # Training step
+            metrics = self.train_step(test_data)
+
+            # Track best
+            if metrics['reward'] > best_reward:
+                # Regenerate best structure (deterministic)
+                with torch.no_grad():
+                    best_pipeline, _ = self.generate_structure_greedy()
+                best_reward = metrics['reward']
+
+            if iteration % 100 == 0:
+                logger.info(
+                    f"Iteration {iteration}: "
+                    f"Reward = {metrics['reward']:.3f}, "
+                    f"Baseline = {metrics['baseline']:.3f}, "
+                    f"Best = {best_reward:.3f}"
+                )
+
+        return best_pipeline
+
+    def generate_structure_greedy(self) -> Tuple[PipelineStructure, List[float]]:
+        """Generate structure by taking argmax (no sampling)"""
+        partial_pipeline = []
+        log_probs = []
+
+        for step in range(10):
+            state = self.encode_state(partial_pipeline)
+            logits = self.controller(state)
+
+            mask = self.get_action_mask(partial_pipeline)
+            logits = logits.masked_fill(~mask, float('-inf'))
+
+            # Take best action (no sampling)
+            action = torch.argmax(logits).item()
+            log_prob = F.log_softmax(logits, dim=-1)[0, action]
+            log_probs.append(log_prob)
+
+            if action == self.n_components:
+                break
+
+            component_name = self.component_list[action]
+            partial_pipeline.append(component_name)
+
+        return PipelineStructure(partial_pipeline), log_probs
+
+
+class ControllerNetwork(nn.Module):
+    """LSTM-based controller for generating architectures"""
+
+    def __init__(self, component_embedding_dim: int,
+                       hidden_dim: int,
+                       output_dim: int):
+        super().__init__()
+
+        self.state_dim = component_embedding_dim
+        self.hidden_dim = hidden_dim
+
+        # Component embeddings (learned)
+        self.component_embeddings = nn.Embedding(output_dim - 1, component_embedding_dim)
+
+        # LSTM for sequential decision making
+        self.lstm = nn.LSTM(component_embedding_dim, hidden_dim, batch_first=True)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass
+
+        Args:
+            state: [batch_size, state_dim] state vector
+
+        Returns:
+            logits: [batch_size, output_dim] action logits
+        """
+        # LSTM forward
+        lstm_out, _ = self.lstm(state.unsqueeze(1))
+
+        # Output layer
+        logits = self.fc(lstm_out[:, -1, :])
+
+        return logits
+```
+
+#### Computational Cost
+
+- **Budget**: 1000-5000+ structure evaluations
+- Each evaluation: parameter optimization (20 evals) + testing
+- **Example**: 3000 architectures × 20 param evals = 60,000 evaluations
+- **Time**: 60,000 evaluations × 1 minute = 1000 hours = 42 days sequential
+- **Requires GPU cluster for parallelization**
+
+#### Pros & Cons
+
+**Pros:**
+✅ No human-defined templates or grammar needed
+✅ Can discover truly novel structures
+✅ Learns from accumulated experience
+✅ Proven approach (NAS-RL, ENAS in neural architecture search)
+✅ Handles complex search spaces with branching/merging
+✅ Adaptive - focuses compute on promising regions
+
+**Cons:**
+❌ Extremely computationally expensive
+❌ Complex implementation (RL expertise required)
+❌ Prone to overfitting test distribution
+❌ Difficult to debug and tune
+❌ Requires substantial infrastructure
+❌ May discover fragile structures that don't generalize
+❌ Long development cycle (1-2 months)
+
+#### When to Use
+
+- Large-scale industrial deployments
+- 10,000+ diverse training examples
+- Budget for weeks/months of GPU time
+- Team with RL expertise
+- Performance delta of 1-2% matters (high-value application)
+- Long-term investment (6-12 month project)
+
+### Other Architecture Search Approaches
+
+#### Template-Based Selection (Simplest)
+
+**Concept:** Human designs 4-6 reasonable pipeline templates. System evaluates each (optimizing parameters within), then selects best.
+
+**When to use:** 90% of practical applications, quick results (1-2 days)
+
+#### Grammar-Based Search
+
+**Concept:** Define formal grammar describing valid pipelines. System samples structures from grammar, optimizes each, selects best.
+
+**When to use:** Need more flexibility than templates, have 1-2 weeks for implementation
+
+See `architecture_search.md` for detailed specifications of these approaches.
+
+### Architecture Search Comparison Matrix
+
+| Criterion | Templates | Grammar | Evolutionary | RL |
+|-----------|-----------|---------|--------------|-----|
+| **Flexibility** | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Compute Cost** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐ | ⭐ |
+| **Implementation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ |
+| **Success Probability** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ |
+| **Interpretability** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐ |
+| **Human Expertise** | High (design) | Medium (grammar) | Low (task), Medium (EA) | Low (task), High (RL) |
+| **Evaluations Needed** | 50-100 | 500-1000 | 1000-3000 | 3000-5000 |
+| **Timeline** | 1-2 days | 1-2 weeks | 3-4 weeks | 1-2 months |
+
+### Integration with COSMOS Parameter Optimization
+
+Architecture search extends COSMOS from:
+- **Current**: Optimize parameters for fixed structure
+- **Future**: Discover optimal structure + optimize parameters
+
+**Two-Stage Approach:**
+1. **Architecture Search** (outer loop): Find optimal structure
+   - Uses RL/Evolution/Grammar/Templates
+   - Each candidate structure evaluated via...
+2. **Parameter Optimization** (inner loop): Find optimal parameters for structure
+   - Uses COSMOS compositional optimization
+   - Returns fitness score for structure
+
+**Nested Optimization:**
+```python
+# Outer loop: Architecture search
+for structure in architecture_search_algorithm():
+    # Inner loop: Parameter optimization (COSMOS)
+    parameter_optimizer = CompositionalOptimizer(structure)
+    best_params = parameter_optimizer.optimize(budget=20)
+
+    # Evaluate structure with optimized parameters
+    fitness = evaluate(structure, best_params, validation_data)
+
+    # Update architecture search algorithm
+    architecture_search_algorithm.update(structure, fitness)
+```
+
 ## Evaluation Framework
 
 ### Metrics Taxonomy
@@ -678,10 +1376,18 @@ pareto_configs = [
 4. **Black Box Components**: Limited optimization for closed-source components
 
 ### Future Research Directions
-1. **Online Optimization**: Continuous adaptation during deployment
-2. **Neural Architecture Predictors**: Learn optimization patterns
-3. **Automated Workflow Discovery**: Automatically identify optimal workflows
-4. **Cross-Modal Transfer**: Transfer between different data modalities
+1. **Architecture Search**: Extend from parameter optimization to structure discovery
+   - Template-based selection (immediate - 1-2 days)
+   - Grammar-based search (near-term - 1-2 weeks)
+   - Evolutionary algorithms (medium-term - 3-4 weeks)
+   - RL-based architecture search (long-term - 1-2 months)
+   - See "Architecture Search" section for detailed specifications
+2. **Online Optimization**: Continuous adaptation during deployment
+3. **Neural Architecture Predictors**: Learn optimization patterns from previous searches
+4. **Automated Workflow Discovery**: Automatically identify optimal component groupings
+5. **Cross-Modal Transfer**: Transfer architectures between different data modalities
+6. **Meta-Learning for Architecture Search**: Learn to search more efficiently across domains
+7. **Multi-Objective Architecture Search**: Discover Pareto-optimal structures for accuracy/latency/cost tradeoffs
 
 ## Conclusion
 
@@ -689,13 +1395,50 @@ COSMOS represents a paradigm shift in ML pipeline optimization, moving from mono
 
 The framework's ability to handle both traditional components and bounded agentic components positions it as a comprehensive solution for modern ML system optimization, from simple pipelines to complex multi-agent workflows.
 
+**Future Vision: From Parameter Optimization to Architecture Discovery**
+
+The current COSMOS framework optimizes **parameters** within **fixed structures**. The natural extension is **architecture search** - discovering optimal structures automatically:
+
+- **Current**: Given chunker → retriever → generator, find best chunk_size, top_k, temperature
+- **Future**: Given component library, discover which components, in what order, with what parameters
+
+This extension transforms COSMOS from a pipeline optimizer into a **meta-system** that designs optimal AI systems for specific use cases:
+- Legal fact-checking may need: retriever → knowledge_base → llm_judge
+- Education fact-checking may need: web_search → confidence_scorer → human_in_loop
+- PDF extraction may need: text_extractor + image_extractor → merge → chunker
+
+Four approaches are detailed in the Architecture Search section:
+1. **Template-based** (1-2 days): Fastest, 90% of use cases
+2. **Grammar-based** (1-2 weeks): More flexible, systematic exploration
+3. **Evolutionary** (3-4 weeks): Simpler than RL, maintains diversity
+4. **Reinforcement Learning** (1-2 months): Most flexible, learns from experience
+
+The combination of COSMOS parameter optimization (inner loop) with architecture search (outer loop) creates a complete AutoML system for LLM-based applications.
+
 ## References and Resources
 
 ### Key Papers
+
+#### Parameter Optimization
 - Bayesian Optimization: Snoek et al., "Practical Bayesian Optimization of Machine Learning Algorithms"
 - Multi-Objective: Deb et al., "A Fast and Elitist Multiobjective Genetic Algorithm: NSGA-II"
 - Transfer Learning: Pan & Yang, "A Survey on Transfer Learning"
 - Compositional Systems: Lake et al., "Building Machines That Learn and Think Like People"
+
+#### Neural Architecture Search (NAS)
+- NAS-RL: Zoph & Le (2017), "Neural Architecture Search with Reinforcement Learning"
+- ENAS: Pham et al. (2018), "Efficient Neural Architecture Search via Parameter Sharing"
+- DARTS: Liu et al. (2019), "DARTS: Differentiable Architecture Search"
+- NASNet: Zoph et al. (2018), "Learning Transferable Architectures for Scalable Image Recognition"
+
+#### Evolutionary Architecture Search
+- AmoebaNet: Real et al. (2019), "Regularized Evolution for Image Classifier Architecture Search"
+- NEAT: Stanley & Miikkulainen (2002), "Evolving Neural Networks through Augmenting Topologies"
+- AutoML-Zero: Real et al. (2020), "AutoML-Zero: Evolving Machine Learning Algorithms From Scratch"
+
+#### Pipeline Optimization
+- auto-sklearn: Feurer et al. (2015), "Efficient and Robust Automated Machine Learning"
+- TPOT: Olson & Moore (2016), "TPOT: A Tree-based Pipeline Optimization Tool"
 
 ### Implementation Resources
 - Repository: `github.com/[your-org]/cosmos`

@@ -47,7 +47,10 @@ class CompositionalOptimizer:
                  test_data: Dict[str, Any],
                  metric_collector: ComponentMetrics,
                  total_budget: int,
-                 budget_allocation: Optional[Dict[str, int]] = None) -> Dict[str, OptimizationResult]:
+                 budget_allocation: Optional[Dict[str, int]] = None,
+                 max_queries: int = 10,
+                 cache_manager: Optional[Any] = None,
+                 dataset_name: Optional[str] = None) -> Dict[str, OptimizationResult]:
         """
         Optimize components sequentially with context passing
 
@@ -60,6 +63,9 @@ class CompositionalOptimizer:
             total_budget: Total number of evaluations across all components
             budget_allocation: Optional custom budget per component
                              If None, splits budget equally
+            max_queries: Maximum number of queries to use per evaluation (default: 10)
+            cache_manager: Optional EmbeddingCacheManager for caching embeddings
+            dataset_name: Name of dataset being used (e.g., 'marco', 'beir/scifact')
 
         Returns:
             Dict mapping component_id -> OptimizationResult
@@ -70,6 +76,10 @@ class CompositionalOptimizer:
         logger.info(f"Components: {components}")
         logger.info(f"Total budget: {total_budget}")
         logger.info(f"Strategy: {self.strategy.get_name()}")
+        if cache_manager:
+            logger.info(f"Cache: ENABLED (dataset={dataset_name}, docs={len(test_data.get('documents', []))})")
+        else:
+            logger.info("Cache: DISABLED")
 
         # Allocate budget across components
         if budget_allocation is None:
@@ -97,7 +107,10 @@ class CompositionalOptimizer:
                 component_type=component_id,
                 test_data=test_data,
                 metric_collector=metric_collector,
-                upstream_components=self.upstream_components.copy()
+                upstream_components=self.upstream_components.copy(),
+                max_queries=max_queries,
+                cache_manager=cache_manager,
+                dataset_name=dataset_name
             )
 
             # Create optimization task

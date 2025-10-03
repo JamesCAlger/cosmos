@@ -2,6 +2,7 @@
 
 from typing import List, Dict, Any
 import openai
+import time
 from ...components.base import Generator, QueryResult
 from loguru import logger
 import os
@@ -11,7 +12,11 @@ load_dotenv()
 
 
 class OpenAIGenerator(Generator):
-    """OpenAI text generation implementation"""
+    """OpenAI text generation implementation with rate limiting"""
+
+    # Class-level variable to track last API call across all instances
+    _last_api_call = 0
+    _rate_limit_lock = None  # Will be initialized on first use
 
     def __init__(self, config: Dict[str, Any] = None):
         super().__init__(config)
@@ -21,13 +26,33 @@ class OpenAIGenerator(Generator):
         self.system_prompt = self.config.get("system_prompt",
             "You are a helpful assistant that answers questions based on the provided context.")
 
+        # Rate limiting configuration:
+        # - Free tier (Tier 0): 3 RPM = 20s delay
+        # - Tier 1: 60 RPM = 1s delay
+        # - Tier 2+: 3500+ RPM = 0.02s delay
+        # Default to 1.5s for Tier 1 (with safety margin)
+        self.rate_limit_delay = self.config.get("rate_limit_delay", 1.5)
+
         # Initialize OpenAI client
         api_key = self.config.get("api_key") or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OpenAI API key not found in config or environment")
 
         self.client = openai.OpenAI(api_key=api_key)
-        logger.info(f"OpenAIGenerator initialized with model: {self.model}")
+        logger.info(f"OpenAIGenerator initialized with model: {self.model}, rate_limit: {self.rate_limit_delay}s")
+
+    def _enforce_rate_limit(self):
+        """Enforce rate limiting by waiting if necessary"""
+        current_time = time.time()
+        time_since_last_call = current_time - OpenAIGenerator._last_api_call
+
+        if time_since_last_call < self.rate_limit_delay:
+            wait_time = self.rate_limit_delay - time_since_last_call
+            logger.info(f"Rate limiting: waiting {wait_time:.1f}s before next API call")
+            time.sleep(wait_time)
+
+        # Update last call time
+        OpenAIGenerator._last_api_call = time.time()
 
     def generate(self, query: str, context: List[QueryResult]) -> str:
         """Generate answer based on query and context"""
@@ -71,6 +96,9 @@ Question: {query}
 Answer:"""
 
         try:
+            # Enforce rate limiting before API call
+            self._enforce_rate_limit()
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[

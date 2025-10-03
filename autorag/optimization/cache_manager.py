@@ -87,19 +87,24 @@ class EmbeddingCacheManager:
         except Exception as e:
             logger.error(f"Failed to save cache index: {e}")
 
-    def get_cache_key(self, chunking_config: Dict, embedder_config: Dict) -> str:
+    def get_cache_key(self, chunking_config: Dict, embedder_config: Dict,
+                      dataset_name: Optional[str] = None, dataset_size: Optional[int] = None) -> str:
         """
-        Generate deterministic cache key from chunking and embedder parameters.
+        Generate deterministic cache key from chunking, embedder, and dataset parameters.
 
         Args:
             chunking_config: Chunking configuration
             embedder_config: Embedder configuration
+            dataset_name: Name of dataset (e.g., 'marco', 'beir/scifact')
+            dataset_size: Number of documents in dataset
 
         Returns:
             String cache key
         """
         # Extract relevant parameters
         key_parts = {
+            'dataset_name': dataset_name or 'unknown',
+            'dataset_size': dataset_size or 0,
             'chunking_strategy': chunking_config.get('strategy', 'unknown'),
             'chunk_size': chunking_config.get('chunk_size', 0),
             'overlap': chunking_config.get('overlap', 0),
@@ -163,7 +168,9 @@ class EmbeddingCacheManager:
                 'timestamp': cache_entry['timestamp'].isoformat() if isinstance(cache_entry['timestamp'], datetime) else cache_entry['timestamp'],
                 'doc_hash': cache_entry['doc_hash'],
                 'num_chunks': len(cache_entry.get('chunks', [])),
-                'compute_time': cache_entry.get('compute_time', 0)
+                'compute_time': cache_entry.get('compute_time', 0),
+                'dataset_name': cache_entry.get('dataset_name', 'unknown'),
+                'dataset_size': cache_entry.get('dataset_size', 0)
             }
             self._save_cache_index()
 
@@ -193,7 +200,9 @@ class EmbeddingCacheManager:
                                   documents: List[str],
                                   chunking_config: Dict,
                                   embedder,
-                                  chunker) -> Tuple[List, Any]:
+                                  chunker,
+                                  dataset_name: Optional[str] = None,
+                                  dataset_size: Optional[int] = None) -> Tuple[List, Any]:
         """
         Returns cached embeddings if available, otherwise computes and caches.
 
@@ -202,6 +211,8 @@ class EmbeddingCacheManager:
             chunking_config: Configuration for chunking
             embedder: Embedder instance
             chunker: Chunker instance
+            dataset_name: Name of dataset (e.g., 'marco', 'beir/scifact')
+            dataset_size: Number of documents in dataset
 
         Returns:
             chunks: List of chunk objects
@@ -222,7 +233,9 @@ class EmbeddingCacheManager:
             'model': getattr(embedder, 'model', 'unknown'),
             'type': type(embedder).__name__
         }
-        cache_key = self.get_cache_key(chunking_config, embedder_config)
+        # Include dataset info in cache key
+        dataset_size = dataset_size or len(documents)
+        cache_key = self.get_cache_key(chunking_config, embedder_config, dataset_name, dataset_size)
         doc_hash = self._hash_documents(documents)
 
         # Check memory cache first
@@ -280,7 +293,9 @@ class EmbeddingCacheManager:
             'chunk_texts': chunk_texts,
             'timestamp': datetime.now(),
             'doc_hash': doc_hash,
-            'compute_time': compute_time
+            'compute_time': compute_time,
+            'dataset_name': dataset_name or 'unknown',
+            'dataset_size': dataset_size
         }
 
         # Add to memory cache

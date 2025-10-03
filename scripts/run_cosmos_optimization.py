@@ -26,22 +26,80 @@ load_dotenv()
 from autorag.cosmos.optimization import CompositionalOptimizerBuilder
 from autorag.cosmos.metrics import ComponentMetrics
 from autorag.evaluation.semantic_metrics import SemanticMetrics
+import numpy as np
 
 
-def load_test_data(num_docs: int = 10, num_queries: int = 3) -> Dict[str, Any]:
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.str_):
+        return str(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_numpy_types(item) for item in obj]
+    else:
+        return obj
+
+
+def load_test_data(num_docs: int = 10, num_queries: int = 3, dataset: str = 'mock') -> Dict[str, Any]:
     """
     Load test data for optimization
 
     Args:
         num_docs: Number of documents to load
         num_queries: Number of queries to use
+        dataset: Dataset to load ('mock', 'marco', 'beir/scifact', etc.)
 
     Returns:
         Dict with 'documents' and 'queries' fields
     """
-    logger.info(f"Loading test data: {num_docs} docs, {num_queries} queries")
+    logger.info(f"Loading test data: dataset={dataset}, {num_docs} docs, {num_queries} queries")
 
-    # Fallback data (can be replaced with MS MARCO loader)
+    # Load from real datasets if specified
+    if dataset != 'mock':
+        from autorag.data import load_dataset as load_benchmark_dataset
+
+        logger.info(f"Loading dataset from: {dataset}")
+        loaded_dataset = load_benchmark_dataset(
+            dataset,
+            num_docs=num_docs,
+            num_queries=num_queries
+        )
+
+        # Convert to expected format
+        # Build document ID to index mapping for ground truth
+        doc_id_to_idx = {doc.id: idx for idx, doc in enumerate(loaded_dataset.documents)}
+
+        documents = [doc.text for doc in loaded_dataset.documents]
+        queries = []
+
+        for q in loaded_dataset.queries:
+            # Map relevant doc IDs to indices in the documents list
+            relevant_doc_indices = []
+            for doc_id in q.relevant_doc_ids:
+                if doc_id in doc_id_to_idx:
+                    relevant_doc_indices.append(doc_id_to_idx[doc_id])
+
+            queries.append({
+                'query': q.text,
+                'answer': q.expected_answer or "No answer provided",
+                'relevant_doc_ids': relevant_doc_indices  # Add ground truth
+            })
+
+        logger.info(f"Loaded {len(documents)} docs, {len(queries)} queries from {dataset}")
+        return {
+            'documents': documents,
+            'queries': queries,
+            'dataset_name': dataset
+        }
+
+    # Fallback mock data
     documents = [
         "Machine learning is a subset of artificial intelligence that provides systems the ability to automatically learn and improve from experience without being explicitly programmed. " * 3,
         "Deep learning is part of a broader family of machine learning methods based on artificial neural networks with representation learning. The networks can be supervised, semi-supervised or unsupervised. " * 3,
@@ -80,13 +138,17 @@ def load_test_data(num_docs: int = 10, num_queries: int = 3) -> Dict[str, Any]:
 
     return {
         'documents': documents[:num_docs],
-        'queries': queries[:num_queries]
+        'queries': queries[:num_queries],
+        'dataset_name': 'mock'
     }
 
 
 def define_search_spaces() -> Dict[str, Dict[str, Any]]:
     """
     Define search spaces for each component
+
+    Note: Real OpenAI embeddings are now used by default for retriever (with caching).
+          Set 'use_real_api': [False] explicitly to use mock embeddings.
 
     Returns:
         Dict mapping component_id -> search_space
@@ -98,11 +160,12 @@ def define_search_spaces() -> Dict[str, Dict[str, Any]]:
             'overlap': [0, 25, 50]
         },
         'retriever': {
-            'retrieval_method': ['sparse', 'dense'],  # Use sparse for speed
+            'retrieval_method': ['sparse', 'dense'],  # Dense recommended with real embeddings
             'retrieval_top_k': [3, 5, 7]
+            # Note: Real embeddings used by default if OPENAI_API_KEY is set
         },
         'generator': {
-            'use_real_api': [False],  # Mock generator for demo
+            'use_real_api': [True],  # Use real OpenAI API
             'temperature': [0.3, 0.5, 0.7]
         }
     }
@@ -116,8 +179,10 @@ def run_cosmos_optimization(
     total_budget: int = 15,
     num_docs: int = 10,
     num_queries: int = 3,
+    dataset: str = 'mock',
     n_initial_points: int = 3,
-    random_state: int = 42
+    random_state: int = 42,
+    use_cache: bool = True
 ) -> Dict[str, Any]:
     """
     Run COSMOS compositional optimization
@@ -128,8 +193,10 @@ def run_cosmos_optimization(
         total_budget: Total evaluation budget
         num_docs: Number of test documents
         num_queries: Number of test queries
+        dataset: Dataset to load ('mock', 'marco', 'beir/scifact', etc.)
         n_initial_points: Initial random points for Bayesian (ignored for random)
         random_state: Random seed
+        use_cache: Whether to use embedding cache (default: True)
 
     Returns:
         Dictionary with optimization results
@@ -145,25 +212,40 @@ def run_cosmos_optimization(
 
     # Load test data
     print("\n[1/5] Loading test data...")
-    test_data = load_test_data(num_docs=num_docs, num_queries=num_queries)
+    test_data = load_test_data(num_docs=num_docs, num_queries=num_queries, dataset=dataset)
     print(f"  [OK] Loaded {len(test_data['documents'])} documents")
     print(f"  [OK] Loaded {len(test_data['queries'])} queries")
+    print(f"  [OK] Dataset: {dataset}")
 
     # Initialize metric collector
-    print("\n[2/5] Initializing metric collector...")
+    print("\n[2/6] Initializing metric collector...")
     semantic_eval = SemanticMetrics(model_name='all-MiniLM-L6-v2')
     metric_collector = ComponentMetrics(semantic_evaluator=semantic_eval)
     print("  [OK] ComponentMetrics initialized with all-MiniLM-L6-v2")
 
+    # Initialize cache manager if enabled
+    print(f"\n[3/6] Initializing cache manager (cache={'enabled' if use_cache else 'disabled'})...")
+    cache_manager = None
+    if use_cache:
+        from autorag.optimization.cache_manager import EmbeddingCacheManager
+        cache_manager = EmbeddingCacheManager(
+            cache_dir=f".embedding_cache_{dataset.replace('/', '_')}",
+            max_memory_mb=2048,
+            use_cache=True
+        )
+        print(f"  [OK] Cache enabled: .embedding_cache_{dataset.replace('/', '_')}/")
+    else:
+        print("  [OK] Cache disabled")
+
     # Define search spaces
-    print("\n[3/5] Defining search spaces...")
+    print("\n[4/6] Defining search spaces...")
     all_search_spaces = define_search_spaces()
     search_spaces = {comp: all_search_spaces[comp] for comp in components}
     for comp_id, space in search_spaces.items():
         print(f"  [OK] {comp_id}: {list(space.keys())}")
 
     # Create optimizer
-    print(f"\n[4/5] Creating compositional optimizer ({strategy})...")
+    print(f"\n[5/6] Creating compositional optimizer ({strategy})...")
     if strategy.lower() == 'bayesian':
         optimizer = CompositionalOptimizerBuilder.create_with_bayesian(
             n_initial_points=n_initial_points,
@@ -176,7 +258,7 @@ def run_cosmos_optimization(
     print(f"  [OK] Optimizer created: {optimizer.strategy.get_name()}")
 
     # Run optimization
-    print("\n[5/5] Running optimization...")
+    print("\n[6/6] Running optimization...")
     print("-" * 80)
 
     start_time = time.time()
@@ -185,7 +267,9 @@ def run_cosmos_optimization(
         search_spaces=search_spaces,
         test_data=test_data,
         metric_collector=metric_collector,
-        total_budget=total_budget
+        total_budget=total_budget,
+        cache_manager=cache_manager,
+        dataset_name=dataset
     )
     total_time = time.time() - start_time
 
@@ -219,8 +303,22 @@ def run_cosmos_optimization(
     print(f"  Total time: {total_time:.2f}s")
     print(f"  Time per evaluation: {total_time / summary['total_evaluations']:.2f}s")
 
-    # Prepare return data
-    return {
+    # Display cache statistics if enabled
+    if cache_manager:
+        print("\n" + "-" * 80)
+        print("Cache Statistics:")
+        stats = cache_manager.get_cache_stats()
+        print(f"  Hit rate: {stats['hit_rate']:.1%}")
+        print(f"  Total hits: {stats['total_hits']}")
+        print(f"  Total misses: {stats['total_misses']}")
+        print(f"  Embeddings computed: {stats['embeddings_computed']}")
+        print(f"  Embeddings from cache: {stats['embeddings_cached']}")
+        print(f"  Time saved: {stats['time_saved_seconds']:.1f}s")
+        print(f"  Estimated cost saved: ${stats['estimated_cost_saved']:.4f}")
+        print(f"  Memory usage: {stats['memory_usage_mb']:.1f} MB")
+
+    # Prepare return data and convert numpy types for JSON serialization
+    return_data = {
         'components': components,
         'strategy': strategy,
         'total_budget': total_budget,
@@ -236,6 +334,9 @@ def run_cosmos_optimization(
         'summary': summary
     }
 
+    # Convert numpy types to native Python types for JSON serialization
+    return convert_numpy_types(return_data)
+
 
 def main():
     """Main entry point"""
@@ -244,17 +345,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Optimize chunker only with random search
+  # Optimize chunker only with mock data
   python scripts/run_cosmos_optimization.py --components chunker --budget 10
 
-  # Optimize chunker and retriever with Bayesian
-  python scripts/run_cosmos_optimization.py --components chunker retriever --strategy bayesian --budget 20
+  # Optimize with MS MARCO dataset
+  python scripts/run_cosmos_optimization.py --components chunker retriever --budget 20 --dataset marco --num-docs 50
 
-  # Optimize full pipeline
-  python scripts/run_cosmos_optimization.py --components chunker retriever generator --strategy bayesian --budget 30
+  # Optimize with BEIR SciFact
+  python scripts/run_cosmos_optimization.py --components retriever generator --dataset beir/scifact --budget 15 --num-docs 100
 
-  # Use more test data
-  python scripts/run_cosmos_optimization.py --components chunker retriever --budget 20 --num-docs 20 --num-queries 5
+  # Full pipeline with Bayesian optimization
+  python scripts/run_cosmos_optimization.py --components chunker retriever generator --strategy bayesian --budget 30 --dataset marco
+
+  # Use more test data from BEIR
+  python scripts/run_cosmos_optimization.py --components chunker retriever --budget 20 --dataset beir/nfcorpus --num-docs 200 --num-queries 10
         """
     )
 
@@ -276,6 +380,9 @@ Examples:
     parser.add_argument('--num-queries', type=int, default=3,
                        help='Number of test queries (default: 3)')
 
+    parser.add_argument('--dataset', type=str, default='mock',
+                       help='Dataset to use: mock, marco, beir/scifact, etc. (default: mock)')
+
     parser.add_argument('--n-initial', type=int, default=3,
                        help='Bayesian: initial random points (default: 3)')
 
@@ -284,6 +391,12 @@ Examples:
 
     parser.add_argument('--output', type=str, default='cosmos_results.json',
                        help='Output file for results (default: cosmos_results.json)')
+
+    parser.add_argument('--use-cache', action='store_true', default=True,
+                       help='Enable embedding cache (default: True)')
+
+    parser.add_argument('--no-cache', dest='use_cache', action='store_false',
+                       help='Disable embedding cache')
 
     args = parser.parse_args()
 
@@ -294,8 +407,10 @@ Examples:
         total_budget=args.budget,
         num_docs=args.num_docs,
         num_queries=args.num_queries,
+        dataset=args.dataset,
         n_initial_points=args.n_initial,
-        random_state=args.seed
+        random_state=args.seed,
+        use_cache=args.use_cache
     )
 
     # Save results
