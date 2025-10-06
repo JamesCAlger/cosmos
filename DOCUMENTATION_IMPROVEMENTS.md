@@ -60,9 +60,20 @@ Discovered during reranker implementation that integration guidance was missing:
 
 ### 🔄 Next Steps
 
-- [ ] Submit PR for documentation improvements
-- [ ] Merge PR after review
+**Immediate**:
+- [x] Submit WIP PR for documentation improvements (PR #3)
+- [ ] Complete pending updates to WIP PR
+- [ ] Remove WIP label and merge PR after review
+
+**Future Work**:
 - [ ] Consider adding more design patterns as discovered during future implementations
+- [ ] **Expand CLAUDE.md per-subfolder pattern across entire codebase** (significant work)
+  - **Current coverage**: 4 CLAUDE.md files (root, components/, cosmos/, components/rerankers/)
+  - **Future scope**: 20+ folders in `autorag/` could benefit from targeted documentation
+  - **Approach**: TBD - needs planning for staged rollout
+  - **Candidates**: optimization/, evaluation/, pipeline/, data/, and component subfolders (chunkers/, embedders/, retrievers/, generators/, vector_stores/)
+  - **Trigger**: When onboarding new developers or when context-switching overhead becomes painful
+  - **Note**: This will be a multi-phase effort requiring prioritization of which folders provide most value
 
 ---
 
