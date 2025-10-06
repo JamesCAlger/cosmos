@@ -69,6 +69,8 @@ class COSMOSComponent:
             return self._process_chunker(*args, **kwargs)
         elif self.type == 'retriever':
             return self._process_retriever(*args, **kwargs)
+        elif self.type == 'reranker':
+            return self._process_reranker(*args, **kwargs)
         elif self.type == 'generator':
             return self._process_generator(*args, **kwargs)
         else:
@@ -133,6 +135,43 @@ class COSMOSComponent:
 
         logger.debug(f"Retriever metrics: {len(results)} results in {latency:.3f}s")
         return results, metrics
+
+    def _process_reranker(self, query: str, results: List, top_k: int = 5, **kwargs) -> Tuple[List, Dict[str, float]]:
+        """
+        Process retrieval results through reranker and collect metrics
+
+        Args:
+            query: Query string
+            results: Retrieval results to rerank
+            top_k: Number of results to return after reranking
+
+        Returns:
+            Tuple of (reranked_results, metrics)
+        """
+        # Handle empty results
+        if not results:
+            return [], {
+                'latency': 0.0,
+                'score_change': 0.0,
+                'rank_correlation': 0.0,
+                'top_k_overlap': 0.0
+            }
+
+        # Time the reranking operation
+        start_time = time.time()
+        reranked = self.base.rerank(query, results, top_k)
+        latency = time.time() - start_time
+
+        # Compute reranking metrics
+        metrics = self.metric_collector.compute_reranking_metrics(
+            query, results, reranked, latency
+        )
+
+        # Store in history
+        self.metrics_history.append(metrics)
+
+        logger.debug(f"Reranker metrics: {len(results)}→{len(reranked)} in {latency:.3f}s")
+        return reranked, metrics
 
     def _process_generator(self, query: str, context: List, **kwargs) -> Tuple[str, Dict[str, float]]:
         """

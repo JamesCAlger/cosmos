@@ -162,11 +162,28 @@ def define_search_spaces() -> Dict[str, Dict[str, Any]]:
         'retriever': {
             'retrieval_method': ['sparse', 'dense'],  # Dense recommended with real embeddings
             'retrieval_top_k': [3, 5, 7]
-            # Note: Real embeddings used by default if OPENAI_API_KEY is set
+            # Note: Automatically uses real embeddings if OPENAI_API_KEY is set, otherwise uses mock
+        },
+        'reranker': {
+            # Model selection (quality vs speed tradeoff)
+            'model_name': [
+                'cross-encoder/ms-marco-MiniLM-L-6-v2',   # Fast, decent (default)
+                'cross-encoder/ms-marco-MiniLM-L-12-v2',  # Better, slower
+            ],
+            # Score normalization
+            'normalize_scores': [True, False],
+            # Batch processing (affects latency)
+            'batch_size': [16, 32, 64],
+            # Over-retrieval amount (how many candidates to retrieve)
+            'retrieval_top_k': [10, 15, 20],
+            # Final top-k after reranking
+            'rerank_top_k': [3, 5, 7]
+            # Note: Constraint enforced in evaluator: retrieval_top_k >= rerank_top_k
+            # Note: Automatically uses real embeddings if OPENAI_API_KEY is set, otherwise uses mock
         },
         'generator': {
-            'use_real_api': [True],  # Use real OpenAI API
             'temperature': [0.3, 0.5, 0.7]
+            # Note: Automatically uses real OpenAI API if OPENAI_API_KEY is set, otherwise uses mock
         }
     }
 
@@ -363,7 +380,7 @@ Examples:
     )
 
     parser.add_argument('--components', nargs='+',
-                       choices=['chunker', 'retriever', 'generator'],
+                       choices=['chunker', 'retriever', 'reranker', 'generator'],
                        default=['chunker', 'retriever'],
                        help='Components to optimize (default: chunker retriever)')
 
