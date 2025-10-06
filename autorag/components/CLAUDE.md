@@ -373,3 +373,6 @@ autorag/components/
 ---
 
 **Last Updated**: 2025-10-06
+**Related Docs**:
+- `autorag/cosmos/CLAUDE.md` - COSMOS optimization framework
+- `autorag/components/rerankers/CLAUDE.md` - Reranker specifics

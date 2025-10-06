@@ -20,7 +20,7 @@
 | **Task 1: DOCS.md index** | `DOCS.md` (NEW) | ✅ Complete | 154 lines, all sections included |
 | **Task 2A: COSMOS flow diagram** | `autorag/cosmos/CLAUDE.md` | ✅ Complete | Added to Component Flow & Context Passing section |
 | **Task 2B: Reranker pipeline diagram** | `autorag/components/rerankers/CLAUDE.md` | ✅ Complete | Replaced simple flow with detailed ASCII diagram |
-| **Task 3: Simplified footers** | All 4 CLAUDE.md files | ✅ Complete | Reduced to single "Last Updated" line |
+| **Task 3: Simplified footers** | All 4 CLAUDE.md files | ✅ Complete | Kept: Last Updated, Status, Related Docs. Removed: Last Verified, Breaking Changes, Maintainer |
 
 **Total from approved tasks**: 4/4 complete (100%)
 

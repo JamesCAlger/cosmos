@@ -507,3 +507,7 @@ After adding a new component type to COSMOS, verify implementation is complete:
 ---
 
 **Last Updated**: 2025-10-06
+**Status**: Fully operational for chunker/retriever/reranker/generator
+**Related Docs**:
+- `autorag/components/CLAUDE.md` - Component architecture
+- `autorag/components/rerankers/CLAUDE.md` - Reranker specifics

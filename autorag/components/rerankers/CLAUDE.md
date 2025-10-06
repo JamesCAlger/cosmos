@@ -263,3 +263,7 @@ if self.reranker:
 ---
 
 **Last Updated**: 2025-10-06
+**Status**: CrossEncoderReranker implemented, COSMOS integration complete
+**Related Docs**:
+- `autorag/components/CLAUDE.md` - Component architecture
+- `autorag/cosmos/CLAUDE.md` - COSMOS framework integration

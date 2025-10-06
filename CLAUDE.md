@@ -489,3 +489,4 @@ python scripts/bayesian_with_cache/run_optimization.py --n-calls 20 --real-api
 ---
 
 **Last Updated**: 2025-10-06
+**Status**: COSMOS framework operational, reranker integration complete
