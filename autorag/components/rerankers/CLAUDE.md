@@ -141,8 +141,48 @@ answer = generator.generate(query, refined)
 ## Pipeline Integration
 
 ### Flow Position
+
+Reranker sits **between retrieval and generation**, enabling over-retrieval followed by refinement:
+
 ```
-Retriever → [top-k=10 results] → Reranker → [top-k=5 reranked] → Generator
+┌──────────────────────────────────────────────────────────────┐
+│                    RAG Pipeline with Reranker                 │
+└──────────────────────────────────────────────────────────────┘
+
+Documents
+   ↓
+┌──────────┐
+│ Chunker  │ → Chunks
+└──────────┘
+   ↓
+┌──────────┐
+│ Retriever│ → Retrieve top-10 candidates (over-retrieve)
+└──────────┘
+   ↓
+   ┌─────────────────────────────────────────────────┐
+   │           Why over-retrieve?                    │
+   │  - Retriever is fast but less accurate          │
+   │  - Get more candidates for reranker to refine   │
+   │  - Example: Retrieve 10, rerank to 5            │
+   └─────────────────────────────────────────────────┘
+   ↓
+┌──────────────┐
+│  Reranker    │ → Re-score with cross-encoder, return top-5
+└──────────────┘
+   ↓
+   ┌─────────────────────────────────────────────────┐
+   │         Reranker refinement                     │
+   │  - Slower but more accurate cross-encoder       │
+   │  - Jointly encodes (query, doc) pairs           │
+   │  - Promotes highly relevant docs                │
+   └─────────────────────────────────────────────────┘
+   ↓
+┌──────────────┐
+│  Generator   │ → Answer (uses refined top-5 context)
+└──────────────┘
+
+
+**Trade-off**: +100-500ms latency for 10-30% relevance improvement
 ```
 
 **Typical pattern**:
@@ -222,5 +262,4 @@ if self.reranker:
 
 ---
 
-**Last Updated**: 2025-10-03
-**Related Docs**: `autorag/components/CLAUDE.md`, `autorag/cosmos/CLAUDE.md`
+**Last Updated**: 2025-10-06

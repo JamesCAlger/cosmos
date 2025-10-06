@@ -488,6 +488,4 @@ python scripts/bayesian_with_cache/run_optimization.py --n-calls 20 --real-api
 
 ---
 
-**Last Updated**: 2025-10-01
-**Project Phase**: COSMOS Framework (Phase 6 Complete)
-**Next Steps**: Generalize COSMOS to other architectures beyond RAG
+**Last Updated**: 2025-10-06
