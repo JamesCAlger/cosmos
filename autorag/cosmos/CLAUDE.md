@@ -53,12 +53,11 @@ Config → Build Pipeline → Evaluate (run full pipeline) → Score
 #### 1. **COSMOSComponent** (`component_wrapper.py`)
 Wraps existing components to add `process_with_metrics()` capability.
 
-**Supported types** (currently):
+**Supported types**:
 - `chunker`: Wraps `BaseChunker` → measures chunking metrics
 - `retriever`: Wraps `BaseRetriever` → measures retrieval metrics
+- `reranker`: Wraps `BaseReranker` → measures reranking metrics
 - `generator`: Wraps `BaseGenerator` → measures generation metrics
-
-**Missing**: `reranker` support (needs to be added)
 
 **Key method**:
 ```python

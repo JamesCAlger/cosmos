@@ -78,6 +78,39 @@ This project uses **focused CLAUDE.md files in subfolders** for efficient contex
 
 ---
 
+## Documentation Evolution
+
+**Current System** (2025-10-06): 4 hierarchical CLAUDE.md files + DOCS.md index
+**Benefit**: 80% context reduction vs scanning code directly
+
+### What We Implemented
+
+- ✅ **DOCS.md index** (91 lines) - Navigation for 20+ folders in `autorag/`
+- ✅ **ASCII diagrams** - COSMOS sequential flow, reranker pipeline position
+- ✅ **Simplified footers** - Just "Last Updated" + "Status" + "Related Docs"
+- ✅ **Integration guidance** - CLI parser warnings, design patterns, verification checklists
+
+### What We Rejected (Pre-Customer Pragmatism)
+
+- ❌ **Documentation tests** - Manual verification fine for 3 developers, 4 docs
+- ❌ **Automated API reference** - Not needed before stable APIs with customers
+- ❌ **Documentation versioning** - Git history sufficient before v1.0
+- ❌ **Maintenance checklists** - Just update docs when code changes (no process overhead)
+- ❌ **Enhanced metadata** - "Last Verified", "Breaking Changes Since", "Maintainer" premature for startup stage
+
+### Expanding to More Folders
+
+**When ready** to add CLAUDE.md to additional folders (candidates: `optimization/`, `evaluation/`, `pipeline/`, `data/`):
+
+1. Copy `autorag/cosmos/CLAUDE.md` (most comprehensive example)
+2. Adapt sections to new component (When to Read, Architecture, Examples, Common Tasks)
+3. Follow established patterns and footer format
+
+**Trigger**: When onboarding new developers or context-switching overhead becomes painful
+**Reality check**: Start with 3-4 high-value folders, not all 20+ candidates at once
+
+---
+
 ## Project Structure
 
 ```
@@ -490,3 +523,7 @@ python scripts/bayesian_with_cache/run_optimization.py --n-calls 20 --real-api
 
 **Last Updated**: 2025-10-06
 **Status**: COSMOS framework operational, reranker integration complete
+**Related Docs**:
+- `autorag/components/CLAUDE.md` - Component architecture and design patterns
+- `autorag/cosmos/CLAUDE.md` - COSMOS framework and sequential optimization
+- `autorag/components/rerankers/CLAUDE.md` - Reranker specifics and integration

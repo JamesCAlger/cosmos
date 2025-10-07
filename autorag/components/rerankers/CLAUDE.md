@@ -181,7 +181,6 @@ Documents
 │  Generator   │ → Answer (uses refined top-5 context)
 └──────────────┘
 
-
 **Trade-off**: +100-500ms latency for 10-30% relevance improvement
 ```
 
@@ -221,15 +220,17 @@ Cross-encoders must encode each (query, doc) pair on-the-fly → infeasible for 
 
 ## COSMOS Integration Status
 
-⚠️ **Not yet integrated** into COSMOS framework:
-- `COSMOSComponent` wrapper lacks reranker handler
-- Component evaluators don't include reranker metrics
-- Search space definitions don't include reranker parameters
+✅ **Integrated** into COSMOS framework:
+- `COSMOSComponent` wrapper includes reranker handler (`_process_reranker()`)
+- Component evaluators include `RerankerEvaluator` with reranker metrics
+- Search space definitions include reranker parameters (model selection, normalization, batch size, top-k values)
+- CLI parser updated to accept `reranker` as a component option
 
-**To add reranker support to COSMOS**, see:
-- `autorag/cosmos/CLAUDE.md` - Framework architecture and step-by-step guide
-- `autorag/cosmos/component_wrapper.py` → `COSMOSComponent.process_with_metrics()` → add 'reranker' elif branch
-- `scripts/bayesian_with_cache/run_optimization.py` → search space definition → shows `'reranking_enabled': [False, True]` pattern
+**Implementation details**:
+- See `autorag/cosmos/CLAUDE.md` → "How to Add a New Component Type" for complete integration guide
+- Reranker metrics: latency, score change, rank correlation, top-k overlap
+- Quality score balances reordering effectiveness with stability
+- Supports both real cross-encoder models and mock implementations for testing
 
 ## Metrics for Optimization
 
