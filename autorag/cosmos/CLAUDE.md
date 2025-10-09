@@ -494,7 +494,9 @@ After adding a new component type to COSMOS, verify implementation is complete:
 - [ ] Environment-aware config? (Crashes when API key missing if not handled)
 - [ ] Upstream dependencies re-initialized? (Retriever/generator evaluators need this)
 - [ ] Metric interpretation documented? (How to read quality score values)
-- [ ] Test expectations correct? (Check k=5 vs k=3 for overlap calculations)
+- [ ] **Metric calculation bugs** (Avoid inconsistent denominators in overlap/precision metrics)
+  - Fixed bug (2025-10-09): `top_k_overlap` used dynamic k instead of fixed k=5, making metrics incomparable
+  - Always use consistent denominators across different config outputs (e.g., k_original=5, not min(5, len(reranked)))
 
 ### Ready to Commit When:
 - [ ] All code checklist items complete

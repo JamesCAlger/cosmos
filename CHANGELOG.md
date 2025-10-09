@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - 2025-10-09
+
+- **Reranker metrics computation bugs** (`autorag/cosmos/metrics/component_metrics.py:307-319, 492-498`)
+  - **Issue #1 - top_k_overlap metric**: Fixed bug where metric used dynamic k=min(5, len(reranked)) instead of fixed k=5 for original set
+    - Symptom: Metrics incomparable across different reranker top_k configurations (k shrunk when reranker returned fewer results)
+    - Example: Retriever returns 10 docs, reranker returns 3 → old k=3 vs new k=5 (consistent)
+    - Impact: Corrupted COSMOS optimization by making reranker quality scores incomparable
+    - Fix: Use fixed k_original=min(5, len(original)) for denominator, compare against min(k_original, len(reranked))
+  - **Issue #2 - no-op reranker penalty**: Fixed incomplete logic for detecting and penalizing no-op rerankers
+    - Symptom: Rerankers with rank_corr=0.92, score_change=0.08 escaped penalty (thresholds too conservative: 0.95, 0.05)
+    - Symptom: High negative correlation incorrectly penalized (abs(rank_corr) > 0.95 caught useful reversals)
+    - Symptom: Penalty too weak (0.5x) - no-op rerankers scored 0.08-0.10 instead of near-zero
+    - Impact: Allowed deployment of useless rerankers that add latency without improving results
+    - Fix: Lower thresholds to (0.9, 0.1), remove abs() to only penalize positive correlation, increase penalty to 0.2x
+  - Added 3 regression tests (`tests/unit/test_reranker_cosmos.py:379-456`) to prevent future regressions
+  - Severity: HIGH - both bugs directly corrupt optimization results and component selection
+
 ### Fixed - 2025-10-01
 
 - **Generator evaluation in multi-component optimization** (`autorag/cosmos/optimization/evaluators.py:426-467`)
