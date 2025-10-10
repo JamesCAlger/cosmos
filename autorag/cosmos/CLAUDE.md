@@ -53,12 +53,11 @@ Config → Build Pipeline → Evaluate (run full pipeline) → Score
 #### 1. **COSMOSComponent** (`component_wrapper.py`)
 Wraps existing components to add `process_with_metrics()` capability.
 
-**Supported types** (currently):
+**Supported types**:
 - `chunker`: Wraps `BaseChunker` → measures chunking metrics
 - `retriever`: Wraps `BaseRetriever` → measures retrieval metrics
+- `reranker`: Wraps `BaseReranker` → measures reranking metrics
 - `generator`: Wraps `BaseGenerator` → measures generation metrics
-
-**Missing**: `reranker` support (needs to be added)
 
 **Key method**:
 ```python
@@ -119,6 +118,50 @@ query → [retriever] → results (context for reranker)
 ```
 
 **Key insight**: Reranker sits **between retriever and generator**, needs retriever output as input.
+
+### COSMOS Sequential Optimization Flow
+
+The key insight: **break circular dependencies** by optimizing components sequentially, passing context forward:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Step 1: Optimize Chunker (no dependencies)                  │
+│                                                              │
+│   Input:  Documents                                         │
+│   Metrics: Chunk coherence, size variance, avg length       │
+│   Output: best_chunker_config                               │
+│                                                              │
+│   Example: {'chunk_size': 256, 'overlap': 50}               │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         │ Context passed: chunks from best_chunker
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 2: Optimize Retriever (uses best_chunker)              │
+│                                                              │
+│   Input:  Chunks from best_chunker                          │
+│   Metrics: Retrieval latency, coverage score                │
+│   Output: best_retriever_config                             │
+│                                                              │
+│   Example: {'retrieval_method': 'dense', 'top_k': 5}        │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         │ Context passed: results from best_retriever
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 3: Optimize Generator (uses best_retriever)            │
+│                                                              │
+│   Input:  Results from best_retriever                       │
+│   Metrics: Answer quality, semantic similarity              │
+│   Output: best_generator_config                             │
+│                                                              │
+│   Example: {'model': 'gpt-3.5-turbo', 'temperature': 0.7}   │
+└─────────────────────────────────────────────────────────────┘
+
+Result: Optimized pipeline without circular dependencies
+```
+
+**Why sequential works**: Each component optimized with best upstream context, breaking the "need full pipeline to evaluate any component" problem.
 
 ## How to Add a New Component Type (Example: Reranker)
 
@@ -211,6 +254,17 @@ def define_search_spaces():
     }
 ```
 
+**⚠️ CRITICAL - Don't Forget CLI Parser**: When adding a new component type, you MUST also update the argparse choices in `scripts/run_cosmos_optimization.py`:
+
+```python
+parser.add_argument('--components', nargs='+',
+                   choices=['chunker', 'retriever', 'reranker', 'generator'],  # ← Add 'reranker'
+                   default=['chunker', 'retriever'],
+                   help='Components to optimize')
+```
+
+**Why this is easy to miss**: The CLI parser is at the top of the script, far from the search space definition. If you forget this, the feature will be completely unusable from the command line (users can't pass the new component name as an argument).
+
 ### Step 7: Update optimization sequence
 
 ```python
@@ -231,6 +285,116 @@ components_to_optimize = ['chunker', 'retriever', 'reranker', 'generator']
 - ✅ Good: "Chunk coherence" (computable from chunks alone)
 - ❌ Bad: "End-to-end latency for retriever" (requires generator)
 - ✅ Good: "Retrieval latency + coverage" (intrinsic to retriever)
+
+## Design Patterns
+
+### Pattern 1: Environment-Aware Configuration
+
+**Problem**: Code should work seamlessly in development (mock API) and production (real API) without manual config changes.
+
+**Solution**: Auto-detect environment based on API key presence instead of hardcoding config values.
+
+**Example** (`optimization/evaluators.py` → `build_component()` for generator):
+```python
+elif component_type == 'generator':
+    import os
+    use_real_api = config.get('use_real_api', True)
+    api_key = os.getenv('OPENAI_API_KEY')
+
+    # Smart fallback: use real API if key exists, otherwise use mock
+    if use_real_api and api_key:
+        from autorag.components.generators.openai import OpenAIGenerator
+        return OpenAIGenerator({
+            'model': config.get('model', 'gpt-3.5-turbo'),
+            'temperature': config.get('temperature', 0.3),
+            'max_tokens': config.get('max_tokens', 150),
+            'api_key': api_key
+        })
+    else:
+        from autorag.components.generators.mock import MockGenerator
+        if use_real_api and not api_key:
+            logger.warning("Generator: OpenAI API key not found, falling back to mock generator")
+        return MockGenerator({'temperature': config.get('temperature', 0.3)})
+```
+
+**Why this matters**:
+- ✅ No crashes when API key missing (graceful degradation)
+- ✅ Works locally without `.env` file
+- ✅ Automatically uses real API in production when key is available
+- ✅ No need to modify search spaces based on environment
+
+**Key pattern**: **Extract → Check → Use (or fallback)** instead of assuming the value exists.
+
+### Pattern 2: Upstream Component Re-initialization
+
+**Problem**: When evaluating a component that depends on upstream components, you can't just reuse the upstream component instance - you need to re-initialize its dependencies (embedder, vector store, etc.).
+
+**Why**: Upstream component configs are passed as references (retriever config doesn't serialize embedder/vector_store instances).
+
+**Solution**: Re-initialize required dependencies at evaluation time.
+
+**Example** (`optimization/evaluators.py` → `_evaluate_reranker()`):
+```python
+def _evaluate_reranker(self, config: Dict[str, Any]) -> float:
+    # 1-2. Get upstream components
+    chunker = self.upstream_components.get('chunker') or default_chunker()
+    retriever = self.upstream_components.get('retriever') or default_retriever()
+
+    # 3. CRITICAL: Re-initialize retriever dependencies
+    # Can't use stored retriever directly - it doesn't have embedder/vector_store set
+    import os
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key and config.get('use_real_api', True):
+        embedder = CachedEmbedder(OpenAIEmbedder({'api_key': api_key}))
+    else:
+        embedder = MockEmbedder({})
+
+    vector_store = SimpleVectorStore({})
+    retriever.set_components(embedder, vector_store)  # Re-initialize at runtime
+
+    # 4. Now build and evaluate reranker
+    reranker = build_component('reranker', config)
+    # ... evaluation logic ...
+```
+
+**Why this matters**:
+- Retriever config is just `{'retrieval_method': 'dense', 'top_k': 5}` - no embedder/vector_store
+- Those are runtime dependencies that must be re-created for each evaluation
+- Without this, retriever can't actually retrieve (no embeddings, no vector store)
+
+**Key pattern**: **Config → Runtime Dependencies → Set Components** for components with external dependencies.
+
+### Pattern 3: Component Wrapper for Metrics Injection
+
+**Pattern**: Use wrapper pattern to add metrics collection without modifying base components.
+
+**Example** (`component_wrapper.py` → `COSMOSComponent`):
+```python
+class COSMOSComponent:
+    def __init__(self, base_component, component_type, metric_collector):
+        self.base = base_component  # Wrap base component
+        self.type = component_type
+        self.metric_collector = metric_collector
+
+    def process_with_metrics(self, *args, **kwargs):
+        # Intercept calls, add metrics collection
+        if self.type == 'reranker':
+            return self._process_reranker(*args, **kwargs)
+        # ... dispatch to correct handler
+
+    def _process_reranker(self, query, results, top_k=5):
+        start_time = time.time()
+        reranked = self.base.rerank(query, results, top_k)  # Use base component
+        latency = time.time() - start_time
+
+        metrics = self.metric_collector.compute_reranking_metrics(...)
+        return reranked, metrics  # Return results + metrics
+```
+
+**Why this matters**:
+- Base components (`CrossEncoderReranker`, `DenseRetriever`, etc.) stay clean - no COSMOS-specific code
+- Metrics collection is centralized in wrapper
+- Easy to add new component types without modifying existing code
 
 ## When to Use COSMOS vs Bayesian
 
@@ -272,8 +436,77 @@ components_to_optimize = ['chunker', 'retriever', 'reranker', 'generator']
 
 **Reference**: See `scripts/bayesian_with_cache/run_optimization.py` for how reranker integrates into pipeline.
 
+## Implementation Verification Checklist
+
+After adding a new component type to COSMOS, verify implementation is complete:
+
+### Code Checklist
+- [ ] **Component wrapper** updated (`component_wrapper.py`)
+  - [ ] Added elif branch in `process_with_metrics()` dispatcher
+  - [ ] Implemented `_process_[component]()` method with metrics collection
+- [ ] **Metrics computation** implemented (`metrics/component_metrics.py`)
+  - [ ] Added `compute_[component]_metrics()` method
+  - [ ] Added quality score case in `compute_quality_score()`
+  - [ ] Documented metric interpretation (what values are "good")
+- [ ] **Component builder** updated (`optimization/evaluators.py`)
+  - [ ] Added elif case in `build_component()` function
+  - [ ] Handles environment-aware config (API key detection, mock fallback)
+- [ ] **Component evaluator** created (`optimization/evaluators.py`)
+  - [ ] Implemented `_evaluate_[component]()` method
+  - [ ] Properly re-initializes upstream component dependencies
+  - [ ] Uses cache manager if available
+- [ ] **Search space** defined (`scripts/run_cosmos_optimization.py`)
+  - [ ] Added component key in `define_search_spaces()`
+  - [ ] Included relevant hyperparameters
+  - [ ] Removed hardcoded environment-specific values (e.g., use_real_api)
+- [ ] **CLI parser** updated (`scripts/run_cosmos_optimization.py`)
+  - [ ] ⚠️ **CRITICAL**: Added component name to argparse choices
+  - [ ] Test: Can you run `--components [new_component]` without error?
+- [ ] **Dependencies** added if needed (`requirements.txt`)
+
+### Testing Checklist
+- [ ] **Unit tests** (`tests/unit/test_[component]_cosmos.py`)
+  - [ ] Test component wrapper basic functionality
+  - [ ] Test metrics computation with known inputs
+  - [ ] Test quality score edge cases (empty results, single result)
+  - [ ] Test component building from config
+  - [ ] Minimum: 10-15 unit tests covering core logic
+- [ ] **Integration tests** (`tests/integration/test_[component]_optimization.py`)
+  - [ ] Test component evaluation with upstream context
+  - [ ] Test upstream component re-initialization
+  - [ ] Test cache manager integration
+  - [ ] Test full optimization sequence
+  - [ ] Minimum: 5-10 integration tests covering end-to-end
+- [ ] **Manual CLI test**:
+  ```bash
+  # Can you run this without errors?
+  python scripts/run_cosmos_optimization.py --components [new_component] --budget 5
+  ```
+- [ ] **Run test suite**:
+  ```bash
+  # All tests passing?
+  pytest tests/unit/test_[component]_cosmos.py -v
+  pytest tests/integration/test_[component]_optimization.py -v
+  ```
+
+### Common Mistakes to Catch
+- [ ] CLI parser updated? (Feature unusable from command line if missing)
+- [ ] Environment-aware config? (Crashes when API key missing if not handled)
+- [ ] Upstream dependencies re-initialized? (Retriever/generator evaluators need this)
+- [ ] Metric interpretation documented? (How to read quality score values)
+- [ ] Test expectations correct? (Check k=5 vs k=3 for overlap calculations)
+
+### Ready to Commit When:
+- [ ] All code checklist items complete
+- [ ] All unit tests passing (14+ tests)
+- [ ] All integration tests passing (10+ tests)
+- [ ] Manual CLI test works
+- [ ] No hardcoded environment-specific values in search spaces
+
 ---
 
-**Last Updated**: 2025-10-03
-**Status**: Fully operational for chunker/retriever/generator, reranker support pending
-**Related Docs**: `autorag/components/CLAUDE.md`, `autorag/components/rerankers/CLAUDE.md`
+**Last Updated**: 2025-10-06
+**Status**: Fully operational for chunker/retriever/reranker/generator
+**Related Docs**:
+- `autorag/components/CLAUDE.md` - Component architecture
+- `autorag/components/rerankers/CLAUDE.md` - Reranker specifics
