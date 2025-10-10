@@ -26,6 +26,58 @@
 
 ---
 
+## 📚 Hierarchical Documentation
+
+This project uses **focused CLAUDE.md files in subfolders** for efficient context management. When working on a specific area, **read the relevant subfolder CLAUDE.md first** for architectural context before diving into code.
+
+### Documentation Navigation Guide
+
+**Start here**: You're reading the right doc! This file covers project setup, running optimizations, and common tasks.
+
+**What are you trying to do?**
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ TASK                              → READ THIS FIRST            │
+├────────────────────────────────────────────────────────────────┤
+│ Setup project & install deps     → Root CLAUDE.md (below)     │
+│ Run optimizations (COSMOS/Bayes) → Root CLAUDE.md (below)     │
+│ Understand project structure     → Root CLAUDE.md (below)     │
+├────────────────────────────────────────────────────────────────┤
+│ Add new component implementation → autorag/components/        │
+│ Understand component architecture → autorag/components/        │
+│ Learn design patterns (wrapper)  → autorag/components/        │
+├────────────────────────────────────────────────────────────────┤
+│ Understand COSMOS framework      → autorag/cosmos/            │
+│ Add component to COSMOS          → autorag/cosmos/            │
+│ Debug optimization issues        → autorag/cosmos/            │
+├────────────────────────────────────────────────────────────────┤
+│ Work with rerankers specifically → autorag/components/rerankers│
+│ Integrate reranker into COSMOS  → autorag/cosmos/ first, then │
+│                                    autorag/components/rerankers│
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Example: Adding Reranker to COSMOS**
+1. `autorag/cosmos/CLAUDE.md` → understand sequential optimization & context passing
+2. `autorag/components/rerankers/CLAUDE.md` → understand reranker purpose & metrics
+3. Jump to specific files with full architectural context
+
+### Available Documentation
+
+- **Root `CLAUDE.md`** (this file): Project overview, setup, running optimizations, common tasks
+- **`autorag/components/CLAUDE.md`**: Component architecture, base classes, data structures, design patterns
+- **`autorag/cosmos/CLAUDE.md`**: COSMOS framework, sequential optimization, adding new component types
+- **`autorag/components/rerankers/CLAUDE.md`**: Reranker specifics, when to use, integration guide
+
+### Benefits of Hierarchical Docs
+
+- **80% context reduction**: Read 2-5KB of targeted docs instead of scanning 50-100KB of code
+- **Faster onboarding**: Understand architectural decisions and patterns in minutes, not hours
+- **Better maintainability**: Documentation lives next to the code it describes
+
+---
+
 ## Project Structure
 
 ```
