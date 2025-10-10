@@ -276,8 +276,9 @@ class TestRerankerQualityScore:
         # Good reranking should score higher than no-op
         assert good_score > no_op_score
 
-        # No-op should be penalized (score < 0.5)
-        assert no_op_score < 0.5
+        # No-op should be severely penalized (score < 0.1)
+        # New penalty: base ~0.18 * 0.2 = ~0.036
+        assert no_op_score < 0.1
 
 
 class TestBuildRerankerComponent:
@@ -373,6 +374,86 @@ class TestRerankerMetricsEdgeCases:
         assert metrics['top_k_overlap'] == 0.0
         # No common chunks to compute correlation
         assert metrics['rank_correlation'] == 0.0
+
+
+class TestRegressionBugFixes:
+    """Regression tests for specific bug fixes in reranker metrics"""
+
+    def test_top_k_overlap_bug_fewer_reranked_results(self):
+        """Regression test for Issue #1: top_k_overlap should use fixed k_original
+
+        Issue: If retriever returns 10 docs and reranker returns only 3,
+        the old logic used k=min(5,10,3)=3 which made metrics incomparable.
+
+        Fix: Use fixed k_original=min(5,len(original)) for denominator,
+        compare against min(k_original, len(reranked)) for numerator.
+        """
+        metrics_collector = ComponentMetrics(semantic_evaluator=None)
+
+        # Retriever returns 10 results
+        original = [create_mock_query_result(f"chunk_{i}", 0.9 - i*0.1) for i in range(10)]
+        # Original top-5: {chunk_0, chunk_1, chunk_2, chunk_3, chunk_4}
+
+        # Reranker returns only 3 results
+        reranked = [
+            create_mock_query_result("chunk_2", 0.95),
+            create_mock_query_result("chunk_4", 0.90),
+            create_mock_query_result("chunk_8", 0.85),
+        ]
+        # Reranked top-3: {chunk_2, chunk_4, chunk_8}
+
+        metrics = metrics_collector.compute_reranking_metrics(
+            "query", original, reranked, latency=0.1
+        )
+
+        # Should compare against k_original=5 (not k=3)
+        # Overlap = {chunk_2, chunk_4} ∩ original_top-5 = 2/5 = 0.4
+        assert abs(metrics['top_k_overlap'] - 0.4) < 0.01, \
+            f"Expected overlap ~0.4, got {metrics['top_k_overlap']}"
+
+    def test_no_op_near_threshold_gets_penalized(self):
+        """Regression test for Issue #2: Near-no-op rerankers should be penalized
+
+        Issue: Old thresholds (0.95, 0.05) let rank_corr=0.92, score_change=0.08
+        escape penalty. New thresholds (0.9, 0.1) catch these cases.
+        """
+        metrics_collector = ComponentMetrics(semantic_evaluator=None)
+
+        # Near-no-op: high correlation, low score change (but below old thresholds)
+        near_no_op_metrics = {
+            'rank_correlation': 0.92,
+            'score_change': 0.08,
+            'latency': 0.1
+        }
+
+        score = metrics_collector.compute_quality_score('reranker', near_no_op_metrics)
+
+        # Should be heavily penalized (new threshold: 0.9, 0.1)
+        # Expected: base ~0.16 * 0.2 = ~0.032
+        assert score < 0.1, f"Near-no-op should score < 0.1, got {score}"
+
+    def test_high_negative_correlation_not_penalized(self):
+        """Regression test for Issue #2: High negative correlation should NOT be penalized
+
+        Issue: Old logic used abs(rank_corr) > 0.95, incorrectly penalizing
+        rerankers that completely reversed the order (useful work, not no-op).
+
+        Fix: Remove abs(), only penalize high POSITIVE correlation (rank_corr > 0.9).
+        """
+        metrics_collector = ComponentMetrics(semantic_evaluator=None)
+
+        # High negative correlation = complete reversal (doing work!)
+        reverse_metrics = {
+            'rank_correlation': -0.95,  # Perfect inverse
+            'score_change': 0.4,         # Meaningful rescoring
+            'latency': 0.2
+        }
+
+        score = metrics_collector.compute_quality_score('reranker', reverse_metrics)
+
+        # Should NOT trigger penalty (only positive correlation > 0.9)
+        # Expected: base quality ~0.7-0.8 (effective reordering)
+        assert score > 0.5, f"Reverse reranker should score > 0.5, got {score}"
 
 
 if __name__ == '__main__':

@@ -222,6 +222,7 @@ class ComponentMetrics:
             - score_change: Mean absolute score change [0-1]
             - rank_correlation: Kendall's tau correlation [-1 to 1]
             - top_k_overlap: Proportion of original top-k retained [0-1]
+                (uses fixed k=5 for original, min(5, len(reranked)) for comparison)
 
         Metric Interpretation (what is "good"):
             rank_correlation:
@@ -304,12 +305,18 @@ class ComponentMetrics:
         else:
             rank_correlation = 0.0
 
-        # 3. Top-k overlap (proportion of original top-k retained)
-        k = min(5, len(original_results), len(reranked_results))
-        orig_top_k_ids = set(orig_ids[:k])
-        reranked_top_k_ids = set(reranked_ids[:k])
+        # 3. Top-k overlap (proportion of original top-k retained in reranked results)
+        # Use fixed k for original set to ensure consistent metric across different reranker configs
+        # e.g., if retriever returns 10 docs and reranker returns 3, we want to measure:
+        # "how many of the original top-5 appear in the reranked top-3?"
+        k_original = min(5, len(original_results))  # Target window (can't take top-5 if only 3 exist)
+        k_reranked = min(k_original, len(reranked_results))  # Reranked might return fewer docs
 
-        overlap = len(orig_top_k_ids & reranked_top_k_ids) / k if k > 0 else 0.0
+        orig_top_k_ids = set(orig_ids[:k_original])
+        reranked_top_k_ids = set(reranked_ids[:k_reranked])
+
+        # Denominator is always k_original: "what fraction of original top-k preserved?"
+        overlap = len(orig_top_k_ids & reranked_top_k_ids) / k_original if k_original > 0 else 0.0
 
         metrics = {
             'latency': float(latency),
@@ -483,9 +490,13 @@ class ComponentMetrics:
             # Base quality: prioritize reordering (70%) over rescoring (30%)
             base_quality = 0.7 * reordering_quality + 0.3 * rescoring_quality
 
-            # Additional penalty for extreme no-op (belt and suspenders)
-            if abs(rank_corr) > 0.95 and score_change < 0.05:
-                base_quality *= 0.5
+            # Severe penalty for true no-op rerankers
+            # (preserve order AND barely change scores = adding latency for no benefit)
+            # Note: Only penalize high POSITIVE correlation (preserved order),
+            #       not negative correlation (reversed order = still doing work)
+            if rank_corr > 0.9 and score_change < 0.1:
+                # 80% penalty - no-ops should be strongly discouraged
+                base_quality *= 0.2
 
             # Latency penalty (>500ms)
             latency_penalty = max(0, (latency - 0.5) * 0.1)
