@@ -202,6 +202,125 @@ class ComponentMetrics:
         logger.debug(f"Retrieval metrics: {metrics}")
         return metrics
 
+    def compute_reranking_metrics(self,
+                                   query: str,
+                                   original_results: List,
+                                   reranked_results: List,
+                                   latency: float) -> Dict[str, float]:
+        """
+        Compute reranking quality metrics
+
+        Args:
+            query: Query string
+            original_results: Results before reranking (List[QueryResult])
+            reranked_results: Results after reranking (List[QueryResult])
+            latency: Time taken to rerank in seconds
+
+        Returns:
+            Dictionary with metrics:
+            - latency: Reranking time in seconds
+            - score_change: Mean absolute score change [0-1]
+            - rank_correlation: Kendall's tau correlation [-1 to 1]
+            - top_k_overlap: Proportion of original top-k retained [0-1]
+
+        Metric Interpretation (what is "good"):
+            rank_correlation:
+                * -0.8 to 0.8 = effective reordering ✓
+                * > 0.8 = no-op passthrough ✗
+                * < -0.9 = extreme inverse (overfitting?) ~
+
+            score_change:
+                * 0.2 to 0.5 = meaningful rescoring ✓
+                * < 0.1 = minimal change ✗
+                * > 0.7 = aggressive rescoring ~
+
+            top_k_overlap:
+                * 0.4 to 0.7 = effective refinement ✓
+                * > 0.9 = minimal reordering ✗
+                * < 0.3 = complete replacement ~
+
+            latency:
+                * < 500ms = acceptable ✓
+                * > 1000ms = too slow ✗
+        """
+        # Handle edge cases
+        if not original_results or not reranked_results:
+            return {
+                'latency': latency,
+                'score_change': 0.0,
+                'rank_correlation': 0.0,
+                'top_k_overlap': 0.0
+            }
+
+        # Single result - can't compute correlation
+        if len(original_results) < 2:
+            return {
+                'latency': latency,
+                'score_change': 0.0,
+                'rank_correlation': 1.0,  # Perfect correlation (trivial)
+                'top_k_overlap': 1.0
+            }
+
+        # Extract scores and IDs
+        orig_scores = np.array([r.score for r in original_results])
+        orig_ids = [r.chunk.chunk_id if hasattr(r.chunk, 'chunk_id') else id(r.chunk)
+                    for r in original_results]
+
+        reranked_ids = [r.chunk.chunk_id if hasattr(r.chunk, 'chunk_id') else id(r.chunk)
+                        for r in reranked_results]
+
+        # 1. Absolute score change
+        # Match reranked results to original by ID
+        # Use absolute change for normalized scores [0,1]
+        # Cross-encoder outputs are sigmoid-normalized, so absolute difference is meaningful
+        score_changes = []
+        for i, orig_id in enumerate(orig_ids):
+            if orig_id in reranked_ids:
+                rerank_idx = reranked_ids.index(orig_id)
+                orig_score = orig_scores[i]
+                new_score = reranked_results[rerank_idx].score
+
+                # Absolute change (appropriate for normalized [0,1] scores)
+                absolute_change = abs(new_score - orig_score)
+                score_changes.append(absolute_change)
+
+        mean_score_change = float(np.mean(score_changes)) if score_changes else 0.0
+
+        # 2. Rank correlation (Kendall's tau)
+        from scipy.stats import kendalltau
+
+        # Map chunk IDs to original ranks
+        orig_rank_map = {chunk_id: rank for rank, chunk_id in enumerate(orig_ids)}
+
+        # Get ranks for reranked results (only for chunks that appear in both)
+        common_ids = [rid for rid in reranked_ids if rid in orig_rank_map]
+
+        if len(common_ids) >= 2:
+            orig_ranks = [orig_rank_map[rid] for rid in common_ids]
+            reranked_ranks = list(range(len(common_ids)))  # 0, 1, 2, ...
+
+            tau, _ = kendalltau(orig_ranks, reranked_ranks)
+            rank_correlation = float(tau) if not np.isnan(tau) else 0.0
+        else:
+            rank_correlation = 0.0
+
+        # 3. Top-k overlap (proportion of original top-k retained)
+        k = min(5, len(original_results), len(reranked_results))
+        orig_top_k_ids = set(orig_ids[:k])
+        reranked_top_k_ids = set(reranked_ids[:k])
+
+        overlap = len(orig_top_k_ids & reranked_top_k_ids) / k if k > 0 else 0.0
+
+        metrics = {
+            'latency': float(latency),
+            'score_change': float(mean_score_change),
+            'rank_correlation': float(rank_correlation),
+            'top_k_overlap': float(overlap)
+        }
+
+        logger.debug(f"Reranking metrics: {metrics}")
+        return metrics
+
     def compute_generation_metrics(self,
                                     query: str,
                                     answer: str,
@@ -333,6 +452,45 @@ class ComponentMetrics:
         elif component_type == 'retriever':
             # Retriever quality: primarily relevance and precision
             quality = 0.7 * metrics['avg_relevance'] + 0.3 * metrics['precision']
+
+        elif component_type == 'reranker':
+            # Reranker quality: effective reordering with meaningful rescoring
+            rank_corr = metrics.get('rank_correlation', 0.0)
+            score_change = metrics.get('score_change', 0.0)
+            latency = metrics.get('latency', 0.0)
+
+            # Reordering quality: reward moderate changes, penalize extremes
+            # - High positive correlation (>0.8): no-op passthrough = bad
+            # - Extreme negative correlation (<-0.9): possible overfitting = questionable
+            # - Sweet spot (-0.8 to 0.8): effective reordering = good
+            if rank_corr > 0.8:
+                # No-op: minimal reordering
+                reordering_quality = 0.2
+            elif rank_corr < -0.9:
+                # Extreme inverse: possible overfitting
+                reordering_quality = 0.6
+            else:
+                # Sweet spot: effective reordering
+                # Quality peaks at moderate correlation (around 0)
+                reordering_quality = 0.8 + 0.2 * (1 - abs(rank_corr) / 0.9)
+
+            # Rescoring quality: target moderate score changes (0.2-0.5)
+            # Too low = passthrough, too high = overfitting
+            target_change = 0.35
+            normalized_change = min(score_change, 1.0)  # Clamp to [0,1]
+            rescoring_quality = 1.0 - min(abs(normalized_change - target_change) / target_change, 1.0)
+
+            # Base quality: prioritize reordering (70%) over rescoring (30%)
+            base_quality = 0.7 * reordering_quality + 0.3 * rescoring_quality
+
+            # Additional penalty for extreme no-op (belt and suspenders)
+            if abs(rank_corr) > 0.95 and score_change < 0.05:
+                base_quality *= 0.5
+
+            # Latency penalty (>500ms)
+            latency_penalty = max(0, (latency - 0.5) * 0.1)
+
+            quality = max(0.0, base_quality - latency_penalty)
 
         elif component_type == 'generator':
             # Generator quality: accuracy and relevance, penalize poor utilization

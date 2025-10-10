@@ -76,22 +76,35 @@ def build_component(component_type: str, config: Dict[str, Any]) -> Any:
             return retriever
 
     elif component_type == 'generator':
-        use_real_api = config.get('use_real_api', False)
+        import os
+        use_real_api = config.get('use_real_api', True)  # Default to True (prefer real if available)
+        api_key = os.getenv('OPENAI_API_KEY')
 
-        if use_real_api:
+        # Smart fallback: use real API if key exists, otherwise use mock
+        if use_real_api and api_key:
             from autorag.components.generators.openai import OpenAIGenerator
-            import os
             return OpenAIGenerator({
                 'model': config.get('model', 'gpt-3.5-turbo'),
                 'temperature': config.get('temperature', 0.3),
                 'max_tokens': config.get('max_tokens', 150),
-                'api_key': os.getenv('OPENAI_API_KEY')
+                'api_key': api_key
             })
         else:
             from autorag.components.generators.mock import MockGenerator
+            if use_real_api and not api_key:
+                logger.warning("Generator: OpenAI API key not found, falling back to mock generator")
             return MockGenerator({
                 'temperature': config.get('temperature', 0.3)
             })
+
+    elif component_type == 'reranker':
+        from autorag.components.rerankers.cross_encoder import CrossEncoderReranker
+        return CrossEncoderReranker({
+            'model_name': config.get('model_name', 'cross-encoder/ms-marco-MiniLM-L-6-v2'),
+            'normalize_scores': config.get('normalize_scores', True),
+            'batch_size': config.get('batch_size', 32),
+            'device': config.get('device', 'cpu')
+        })
 
     else:
         raise ValueError(f"Unknown component type: {component_type}")
@@ -182,6 +195,8 @@ class ComponentEvaluator:
             return self._evaluate_chunker(config)
         elif self.component_type == 'retriever':
             return self._evaluate_retriever(config)
+        elif self.component_type == 'reranker':
+            return self._evaluate_reranker(config)
         elif self.component_type == 'generator':
             return self._evaluate_generator(config)
         else:
@@ -398,6 +413,177 @@ class ComponentEvaluator:
 
         except Exception as e:
             logger.error(f"Retriever evaluation failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return 0.0
+
+    def _evaluate_reranker(self, config: Dict[str, Any]) -> float:
+        """
+        Evaluate reranker configuration with FIXED upstream components
+
+        Uses best chunker and best retriever from previous optimizations.
+
+        CRITICAL: Upstream retriever must be re-initialized with embedder and vector store,
+        as these dependencies are not persisted in the retriever config.
+
+        Args:
+            config: Reranker configuration with keys:
+                - model_name: Cross-encoder model
+                - normalize_scores: Whether to normalize scores
+                - batch_size: Batch size for prediction
+                - retrieval_top_k: Number of candidates to retrieve (over-retrieval)
+                - rerank_top_k: Final number of results after reranking
+
+        Returns:
+            Quality score [0, 1]
+        """
+        try:
+            # 1. Get or create upstream chunker
+            if 'chunker' not in self.upstream_components:
+                logger.warning("No upstream chunker provided, using default")
+                from autorag.components.chunkers.fixed_size import FixedSizeChunker
+                chunker = FixedSizeChunker({'chunk_size': 256, 'overlap': 50})
+            else:
+                chunker = self.upstream_components['chunker']
+
+            # 2. Get or create upstream retriever
+            if 'retriever' not in self.upstream_components:
+                logger.warning("No upstream retriever provided, using default")
+                from autorag.components.retrievers.dense import DenseRetriever
+                retriever = DenseRetriever({'metric': 'cosine', 'top_k': 5})
+            else:
+                retriever = self.upstream_components['retriever']
+
+            # 3. CRITICAL: Re-initialize retriever dependencies
+            # The retriever config doesn't persist embedder/vector store, so we must set them up
+            logger.debug("Re-initializing retriever dependencies for reranker evaluation")
+
+            import os
+            api_key = os.getenv('OPENAI_API_KEY')
+
+            if api_key and config.get('use_real_api', True):
+                from autorag.components.embedders.openai import OpenAIEmbedder
+                from autorag.components.embedders.cached import CachedEmbedder
+
+                # Create real embedder with caching
+                real_embedder = OpenAIEmbedder({
+                    'model': 'text-embedding-ada-002',
+                    'api_key': api_key
+                })
+                embedder = CachedEmbedder(real_embedder)
+                logger.info("Reranker eval: Using OpenAI embeddings with caching")
+            else:
+                from autorag.components.embedders.mock import MockEmbedder
+                embedder = MockEmbedder({})
+                logger.debug("Reranker eval: Using mock embeddings")
+
+            from autorag.components.vector_stores.simple import SimpleVectorStore
+            vector_store = SimpleVectorStore({})
+
+            # Set components on retriever
+            if hasattr(retriever, 'set_components'):
+                retriever.set_components(embedder, vector_store)
+            elif hasattr(retriever, 'embedder'):
+                retriever.embedder = embedder
+                retriever.vector_store = vector_store
+            else:
+                logger.warning("Retriever doesn't support set_components or direct attribute access")
+
+            # 4. Build reranker from config
+            reranker = build_component('reranker', config)
+            cosmos_reranker = COSMOSComponent(reranker, 'reranker', self.metric_collector)
+
+            # 5. Prepare documents and index
+            documents = self.test_data.get('documents', [])
+
+            # Use cache manager if available (like retriever evaluator)
+            if self.cache_manager and config.get('use_real_api', True):
+                logger.debug("Reranker eval: Using cache manager for chunking and embedding")
+
+                # Extract chunker configuration for caching
+                from autorag.components.chunkers.semantic import SemanticChunker
+                chunker_config = {
+                    'strategy': 'semantic' if isinstance(chunker, SemanticChunker) else 'fixed',
+                    'chunk_size': getattr(chunker, 'chunk_size', 512),
+                    'overlap': getattr(chunker, 'overlap', 0),
+                }
+                if isinstance(chunker, SemanticChunker):
+                    chunker_config['threshold'] = getattr(chunker, 'threshold', 0.5)
+
+                # Get cached or compute embeddings
+                chunks, embeddings = self.cache_manager.get_or_compute_embeddings(
+                    documents,
+                    chunker_config,
+                    embedder,
+                    chunker,
+                    dataset_name=self.dataset_name,
+                    dataset_size=self.dataset_size
+                )
+
+                # Index with pre-computed embeddings
+                if hasattr(retriever, 'index_with_embeddings'):
+                    retriever.index_with_embeddings(chunks, embeddings)
+                    logger.debug(f"Reranker eval: Indexed {len(chunks)} chunks using cache")
+                else:
+                    # Fallback: regular indexing
+                    retriever.index(chunks)
+            else:
+                # Original flow without caching
+                doc_objects = [Document(content=doc, doc_id=str(i))
+                              for i, doc in enumerate(documents)]
+                chunks = chunker.chunk(doc_objects)
+                retriever.index(chunks)
+                logger.debug(f"Reranker eval: Indexed {len(chunks)} chunks without cache")
+
+            # 6. Extract hyperparameters for over-retrieval
+            retrieval_top_k = config.get('retrieval_top_k', 10)  # Over-retrieve
+            rerank_top_k = config.get('rerank_top_k', 5)  # Final top-k
+
+            # Ensure constraint: retrieval_top_k >= rerank_top_k
+            if retrieval_top_k < rerank_top_k:
+                logger.warning(f"retrieval_top_k ({retrieval_top_k}) < rerank_top_k ({rerank_top_k}), adjusting")
+                retrieval_top_k = rerank_top_k
+
+            # 7. Evaluate on queries (limit for speed and cost)
+            queries = self.test_data.get('queries', [])[:self.max_queries]
+            quality_scores = []
+
+            for query_data in queries:
+                if isinstance(query_data, dict):
+                    query = query_data.get('query', query_data.get('question', ''))
+                else:
+                    query = str(query_data)
+
+                if not query:
+                    continue
+
+                # Retrieve candidates (over-retrieve for reranking)
+                results = retriever.retrieve(query, top_k=retrieval_top_k)
+
+                # Skip if no results
+                if not results:
+                    continue
+
+                # Rerank
+                reranked, metrics = cosmos_reranker.process_with_metrics(
+                    query, results, top_k=rerank_top_k
+                )
+
+                # Compute quality
+                quality = self.metric_collector.compute_quality_score('reranker', metrics)
+                quality_scores.append(quality)
+
+            # Average quality across queries
+            if quality_scores:
+                avg_quality = float(np.mean(quality_scores))
+            else:
+                avg_quality = 0.0
+
+            logger.debug(f"Reranker evaluation: {len(quality_scores)} queries, avg_quality={avg_quality:.3f}")
+            return avg_quality
+
+        except Exception as e:
+            logger.error(f"Reranker evaluation failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return 0.0
